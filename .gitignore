@@ -1,0 +1,15 @@
+# SQLite database
+data.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# IDE
+.idea/
+
+# Temporary files
+tmp/concat/
