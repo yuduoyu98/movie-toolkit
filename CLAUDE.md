@@ -46,10 +46,9 @@ tmp/concat/                  ← Temp segments for concat (cleaned before each r
 
 - **MainWindow** — `QStackedWidget`: ProjectListPage ↔ WorkbenchPage. Sets app icon and Windows AppUserModelID.
 - **ProjectListPage** — List / create / delete projects.
-- **WorkbenchPage** — 4 tabs + archive dialog:
+- **WorkbenchPage** — 3 tabs + archive dialog:
   - **GIF** — Width/fps/colors (default 600/30/256), brightness/contrast/speed filters.
-  - **Video Cut** — Single segment, -codec copy / -an / -aspect / -map options.
-  - **Concat** — Multi-segment with ▲▼ reorder, ⏃ sort, time-sequence validation.
+  - **Video Cut** — Unified tab: single segment → cut_video (`-` separator in filename); multi-segment → concat (`~` separator). Segment table with ▲▼ reorder, ⏃ sort, time-sequence validation. Options: -codec copy / -an / -aspect / -map.
   - **Image Rename** — Scan directory, filter by prefix, checkbox select, batch rename with auto-increment (skips existing numbered files). Lazy thumbnail loading. Double-click preview with ←→ navigation.
   - **归档整理** — Button in top bar. ArchiveDialog: scan files for `[Country]` prefix, classify into `{archive_root}/{Country}/{Actor}/[{Year}]{Movie}/` structure.
 - **ActorSelector** — Search, autocomplete, multi-select tags, inline actor creation, drag-to-reorder.

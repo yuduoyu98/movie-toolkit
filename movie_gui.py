@@ -467,11 +467,14 @@ class ActorSelector(QWidget):
         self.ed_search.setCompleter(self.completer)
         self._refresh_completer()
 
-        btn_new = QPushButton("+")
-        btn_new.setFixedWidth(28)
+        btn_new = QPushButton("新增")
         btn_new.setToolTip("录入新演员")
         btn_new.clicked.connect(self._on_new_actor)
         search_row.addWidget(btn_new)
+
+        btn_manage = QPushButton("演员库")
+        btn_manage.clicked.connect(self._on_manage_actors)
+        search_row.addWidget(btn_manage)
 
         layout.addLayout(search_row)
 
@@ -482,10 +485,7 @@ class ActorSelector(QWidget):
         self.tags_layout = FlowLayout(self.tags_widget, margin=2, spacing=4)
         layout.addWidget(self.tags_widget)
 
-        # 演员库管理按钮
-        btn_manage = QPushButton("管理演员库...")
-        btn_manage.clicked.connect(self._on_manage_actors)
-        layout.addWidget(btn_manage)
+
 
     def _refresh_completer(self):
         """刷新自动补全候选列表，已绑定项目的演员前缀 ●"""
@@ -926,28 +926,34 @@ class ProjectListPage(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
         title = QLabel("影片项目")
         title.setStyleSheet("font-size: 22px; font-weight: bold; color: #2c3e50;")
         layout.addWidget(title)
+
+        # 搜索框
+        self.ed_search = QLineEdit()
+        self.ed_search.setPlaceholderText("搜索项目…")
+        self.ed_search.setClearButtonEnabled(True)
+        self.ed_search.setMinimumHeight(36)
+        self.ed_search.setStyleSheet("font-size: 14px; padding: 4px 8px;")
+        self.ed_search.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.ed_search)
 
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet("""
             QListWidget {
                 border: 1px solid #dcdcdc;
                 border-radius: 6px;
-                padding: 8px;
+                padding: 4px;
                 font-size: 14px;
             }
             QListWidget::item {
-                padding: 12px;
                 border-bottom: 1px solid #f0f0f0;
             }
             QListWidget::item:selected {
-                background-color: #3498db;
-                color: white;
-                border-radius: 4px;
+                background-color: transparent;
             }
         """)
         self.list_widget.itemDoubleClicked.connect(self._on_open)
@@ -955,7 +961,9 @@ class ProjectListPage(QWidget):
 
         btn_bar = QHBoxLayout()
 
-        btn_new = QPushButton("+ 新建项目")
+        btn_bar.addStretch()
+
+        btn_new = QPushButton("新建项目")
         btn_new.setStyleSheet("padding: 10px 20px; font-size: 14px;")
         btn_new.clicked.connect(self._on_new)
         btn_bar.addWidget(btn_new)
@@ -969,31 +977,78 @@ class ProjectListPage(QWidget):
         btn_open.clicked.connect(self._on_open)
         btn_bar.addWidget(btn_open)
 
-        btn_del = QPushButton("删除")
-        btn_del.setStyleSheet("padding: 10px 20px; font-size: 14px; color: #c0392b;")
-        btn_del.clicked.connect(self._on_delete)
-        btn_bar.addWidget(btn_del)
-
-        btn_bar.addStretch()
         layout.addLayout(btn_bar)
+
+    def _build_project_row(self, p: Project) -> QWidget:
+        """构建项目行：粗体名称 + 编辑/删除按钮"""
+        p.resolve_actors(self.actor_manager)
+        row = QWidget()
+        row.setAutoFillBackground(False)
+        row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 10, 8, 10)
+        h.setSpacing(8)
+
+        name_lbl = QLabel(p.short_name)
+        name_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50;")
+        name_lbl.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
+        name_lbl.mouseDoubleClickEvent = lambda ev: self._on_open()
+        h.addWidget(name_lbl, stretch=1)
+
+        btn_edit = QPushButton("编辑")
+        btn_edit.setFixedWidth(50)
+        btn_edit.setStyleSheet(
+            "QPushButton { font-size: 12px; padding: 4px 8px; color: #2980b9; "
+            "border: 1px solid #2980b9; border-radius: 4px; background: transparent; }"
+            "QPushButton:hover { background: #eaf2f8; }"
+        )
+        btn_edit.clicked.connect(lambda checked, pid=p.id: self._on_edit_project(pid))
+        h.addWidget(btn_edit)
+
+        btn_del = QPushButton("删除")
+        btn_del.setFixedWidth(50)
+        btn_del.setStyleSheet(
+            "QPushButton { font-size: 12px; padding: 4px 8px; color: #c0392b; "
+            "border: 1px solid #c0392b; border-radius: 4px; background: transparent; }"
+            "QPushButton:hover { background: #fdf2f2; }"
+        )
+        btn_del.clicked.connect(lambda checked, pid=p.id: self._on_delete_project(pid))
+        h.addWidget(btn_del)
+
+        return row
 
     def _refresh_list(self):
         self.list_widget.clear()
         projects = self.manager.list_projects()
         for p in projects:
-            item = QListWidgetItem(p.short_name)
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, p.id)
-            # 显示演员信息在tooltip
-            p.resolve_actors(self.actor_manager)
+            item.setSizeHint(QSize(0, 48))
             tooltip = f"{p.display_name}\n源: {p.source_file_path}\n输出: {p.target_base_path}"
             item.setToolTip(tooltip)
             self.list_widget.addItem(item)
+            row_widget = self._build_project_row(p)
+            self.list_widget.setItemWidget(item, row_widget)
 
         if not projects:
-            empty = QListWidgetItem("暂无项目，点击「新建项目」")
+            empty = QListWidgetItem("暂无项目")
             empty.setFlags(Qt.NoItemFlags)
             empty.setForeground(Qt.gray)
             self.list_widget.addItem(empty)
+
+    def _apply_filter(self):
+        """搜索过滤"""
+        text = self.ed_search.text().strip().lower()
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.flags() == Qt.NoItemFlags:
+                continue  # 空状态占位
+            row_widget = self.list_widget.itemWidget(item)
+            if row_widget:
+                name_lbl = row_widget.findChild(QLabel)
+                if name_lbl:
+                    match = text in name_lbl.text().lower()
+                    item.setHidden(not match)
 
     def _current_project(self) -> Optional[Project]:
         item = self.list_widget.currentItem()
@@ -1025,17 +1080,29 @@ class ProjectListPage(QWidget):
         else:
             QMessageBox.information(self, "提示", "请先选择一个项目")
 
-    def _on_delete(self):
-        proj = self._current_project()
+    def _on_edit_project(self, pid: int):
+        proj = self.manager.get_project(pid)
+        if not proj:
+            return
+        dlg = ProjectDialog(self, proj, self.actor_manager)
+        if dlg.exec_() == QDialog.Accepted:
+            new_proj = dlg.get_project()
+            new_proj._data["id"] = proj.id
+            new_proj._data["slug"] = proj.slug
+            self.manager.save(new_proj)
+            self._refresh_list()
+
+    def _on_delete_project(self, pid: int):
+        proj = self.manager.get_project(pid)
         if not proj:
             return
         reply = QMessageBox.question(
             self, "确认删除",
-            f"删除项目 [{proj.short_name}]？\n（不会删除已生成的文件）",
+            f"删除项目 {proj.short_name}？\n（不会删除已生成的文件）",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self.manager.delete(proj.id)
+            self.manager.delete(pid)
             self._refresh_list()
 
 
@@ -1059,25 +1126,23 @@ class WorkbenchPage(QWidget):
         # 顶部信息栏
         info_bar = QHBoxLayout()
 
-        btn_back = QPushButton("← 返回列表")
-        btn_back.setFixedWidth(100)
-        btn_back.clicked.connect(self.back_signal.emit)
-        info_bar.addWidget(btn_back)
-
         self.lbl_proj_title = QLabel("-")
         self.lbl_proj_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
         info_bar.addWidget(self.lbl_proj_title, stretch=1)
 
-        btn_edit = QPushButton("编辑项目")
-        btn_edit.setFixedWidth(100)
+        btn_edit = QPushButton("编辑")
+        btn_edit.setToolTip("编辑项目信息")
         btn_edit.clicked.connect(self._on_edit_project)
         info_bar.addWidget(btn_edit)
 
-        btn_archive = QPushButton("归档整理")
-        btn_archive.setFixedWidth(100)
-        btn_archive.setToolTip("按国家→演员→电影 归类整理输出目录中的文件")
+        btn_archive = QPushButton("归档")
+        btn_archive.setToolTip("按国家→演员→电影归类整理输出目录中的文件")
         btn_archive.clicked.connect(self._on_archive)
         info_bar.addWidget(btn_archive)
+
+        btn_back = QPushButton("退出")
+        btn_back.clicked.connect(self.back_signal.emit)
+        info_bar.addWidget(btn_back)
 
         layout.addLayout(info_bar)
 
@@ -1117,7 +1182,6 @@ class WorkbenchPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_gif_tab(), "GIF 制作")
         self.tabs.addTab(self._build_video_tab(), "视频剪辑")
-        self.tabs.addTab(self._build_concat_tab(), "多段拼接")
         self.tabs.addTab(self._build_rename_tab(), "图片重命名")
         layout.addWidget(self.tabs, stretch=1)
 
@@ -1241,7 +1305,7 @@ class WorkbenchPage(QWidget):
         row_param.addStretch()
         left_layout.addLayout(row_param)
 
-        adv = QGroupBox("画面调整（可选）")
+        adv = QGroupBox("画面调整")
         adv_layout = QGridLayout(adv)
         self.chk_brightness = QCheckBox("亮度")
         self.spin_brightness = QDoubleSpinBox()
@@ -1302,73 +1366,7 @@ class WorkbenchPage(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
-
-        row_time = QHBoxLayout()
-        row_time.addWidget(QLabel("起始时间:"))
-        self.ed_vid_start = QLineEdit("00:00:00.000")
-        self.ed_vid_start.textChanged.connect(self._update_preview)
-        row_time.addWidget(self.ed_vid_start)
-        row_time.addWidget(QLabel("结束时间:"))
-        self.ed_vid_end = QLineEdit("00:00:05.000")
-        self.ed_vid_end.textChanged.connect(self._update_preview)
-        row_time.addWidget(self.ed_vid_end)
-        left_layout.addLayout(row_time)
-
-        opts = QGroupBox("选项")
-        opts_layout = QGridLayout(opts)
-        self.chk_copy = QCheckBox("流复制 (-codec copy)")
-        self.chk_copy.stateChanged.connect(self._update_preview)
-        opts_layout.addWidget(self.chk_copy, 0, 0)
-        self.chk_no_audio = QCheckBox("去除音轨 (-an)")
-        opts_layout.addWidget(self.chk_no_audio, 0, 1)
-        self.chk_aspect = QCheckBox("强制比例")
-        self.cb_aspect = QComboBox()
-        self.cb_aspect.addItems(["16:9", "4:3", "1:1"])
-        opts_layout.addWidget(self.chk_aspect, 1, 0)
-        opts_layout.addWidget(self.cb_aspect, 1, 1)
-        self.chk_audio_idx = QCheckBox("指定音轨")
-        self.spin_audio_idx = QSpinBox()
-        self.spin_audio_idx.setMinimum(1)
-        self.spin_audio_idx.setValue(1)
-        opts_layout.addWidget(self.chk_audio_idx, 1, 2)
-        opts_layout.addWidget(self.spin_audio_idx, 1, 3)
-        opts_layout.setColumnStretch(4, 1)
-        left_layout.addWidget(opts)
-        left_layout.addStretch()
-
-        # === 右侧：演员选择 ===
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        actor_sel = ActorSelector(self.actor_manager)
-        actor_sel.actors_changed.connect(self._update_preview)
-        actor_sel.actors_changed.connect(lambda s=actor_sel: self._save_tab_actors(s))
-        right_layout.addWidget(actor_sel)
-        right_layout.addStretch()
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color: #ccd5de;")
-        hbox.addWidget(left, stretch=6)
-        hbox.addWidget(sep)
-        hbox.addWidget(right, stretch=4)
-        return tab
-
-    def _build_concat_tab(self) -> QWidget:
-        tab = QWidget()
-        hbox = QHBoxLayout(tab)
-        hbox.setSpacing(12)
-
-        # === 左侧：剪辑参数 ===
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
-
-        hint = QLabel("每行输入一段：起始时间,结束时间  （如 00:09:37.043,00:09:51.557）")
-        hint.setStyleSheet("color: #7f8c8d;")
-        left_layout.addWidget(hint)
 
         self.table_segments = QTableWidget(0, 2)
         self.table_segments.setHorizontalHeaderLabels(["起始时间", "结束时间"])
@@ -1378,50 +1376,71 @@ class WorkbenchPage(QWidget):
         left_layout.addWidget(self.table_segments, stretch=1)
 
         btn_bar = QHBoxLayout()
-        btn_add = QPushButton("+ 添加段")
+        btn_add = QPushButton("添加")
+        btn_add.setToolTip("添加一个时间段")
         btn_add.clicked.connect(self._add_segment_row)
         btn_bar.addWidget(btn_add)
-        btn_del = QPushButton("- 删除选中")
+        btn_del = QPushButton("删除")
+        btn_del.setToolTip("删除选中的时间段")
         btn_del.clicked.connect(self._del_segment_row)
         btn_bar.addWidget(btn_del)
-        btn_load = QPushButton("从文本导入")
+        btn_load = QPushButton("导入")
+        btn_load.setToolTip("从文本批量导入时间段")
         btn_load.clicked.connect(self._load_segments_from_text)
         btn_bar.addWidget(btn_load)
         btn_bar.addSpacing(8)
-        btn_up = QPushButton("▲ 上移")
+        btn_up = QPushButton("上移")
+        btn_up.setToolTip("上移选中段")
         btn_up.clicked.connect(lambda: self._move_segment_row(-1))
         btn_bar.addWidget(btn_up)
-        btn_down = QPushButton("▼ 下移")
+        btn_down = QPushButton("下移")
+        btn_down.setToolTip("下移选中段")
         btn_down.clicked.connect(lambda: self._move_segment_row(1))
         btn_bar.addWidget(btn_down)
-        btn_sort = QPushButton("⏃ 按时间排序")
+        btn_sort = QPushButton("排序")
+        btn_sort.setToolTip("按起始时间排序")
         btn_sort.clicked.connect(self._sort_segments)
         btn_bar.addWidget(btn_sort)
         btn_bar.addStretch()
-        self.lbl_concat_warn = QLabel("")
-        self.lbl_concat_warn.setStyleSheet("color: #e67e22; font-size: 12px;")
-        btn_bar.addWidget(self.lbl_concat_warn)
+        self.lbl_vid_warn = QLabel("")
+        self.lbl_vid_warn.setStyleSheet("color: #e67e22; font-size: 12px;")
+        self.lbl_vid_warn.setMaximumWidth(260)
+        self.lbl_vid_warn.setWordWrap(False)
+        self.lbl_vid_warn.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
+        self.lbl_vid_warn.mousePressEvent = self._on_warn_clicked
+        btn_bar.addWidget(self.lbl_vid_warn)
         left_layout.addLayout(btn_bar)
 
         opts = QGroupBox("选项")
         opts_layout = QGridLayout(opts)
-        self.chk_concat_copy = QCheckBox("流复制 (-codec copy)")
-        opts_layout.addWidget(self.chk_concat_copy, 0, 0)
-        self.chk_concat_no_audio = QCheckBox("去除音轨 (-an)")
-        opts_layout.addWidget(self.chk_concat_no_audio, 0, 1)
-        self.chk_concat_aspect = QCheckBox("强制比例")
-        self.cb_concat_aspect = QComboBox()
-        self.cb_concat_aspect.addItems(["16:9", "4:3", "1:1"])
-        opts_layout.addWidget(self.chk_concat_aspect, 1, 0)
-        opts_layout.addWidget(self.cb_concat_aspect, 1, 1)
-        self.chk_concat_audio_idx = QCheckBox("指定音轨")
-        self.spin_concat_audio_idx = QSpinBox()
-        self.spin_concat_audio_idx.setMinimum(1)
-        self.spin_concat_audio_idx.setValue(1)
-        opts_layout.addWidget(self.chk_concat_audio_idx, 1, 2)
-        opts_layout.addWidget(self.spin_concat_audio_idx, 1, 3)
+        self.chk_copy = QCheckBox("流复制")
+        self.chk_copy.setToolTip("-codec copy")
+        self.chk_copy.stateChanged.connect(self._update_preview)
+        opts_layout.addWidget(self.chk_copy, 0, 0)
+        self.chk_no_audio = QCheckBox("去音轨")
+        self.chk_no_audio.setToolTip("-an")
+        self.chk_no_audio.stateChanged.connect(self._update_preview)
+        opts_layout.addWidget(self.chk_no_audio, 0, 1)
+        self.chk_aspect = QCheckBox("比例")
+        self.chk_aspect.setToolTip("强制宽高比 (-aspect)")
+        self.chk_aspect.stateChanged.connect(self._update_preview)
+        self.cb_aspect = QComboBox()
+        self.cb_aspect.addItems(["16:9", "4:3", "1:1"])
+        self.cb_aspect.currentTextChanged.connect(self._update_preview)
+        opts_layout.addWidget(self.chk_aspect, 1, 0)
+        opts_layout.addWidget(self.cb_aspect, 1, 1)
+        self.chk_audio_idx = QCheckBox("音轨")
+        self.chk_audio_idx.setToolTip("指定音轨索引 (-map 0:a:N)")
+        self.chk_audio_idx.stateChanged.connect(self._update_preview)
+        self.spin_audio_idx = QSpinBox()
+        self.spin_audio_idx.setMinimum(1)
+        self.spin_audio_idx.setValue(1)
+        self.spin_audio_idx.valueChanged.connect(self._update_preview)
+        opts_layout.addWidget(self.chk_audio_idx, 1, 2)
+        opts_layout.addWidget(self.spin_audio_idx, 1, 3)
         opts_layout.setColumnStretch(4, 1)
         left_layout.addWidget(opts)
+        left_layout.addStretch()
 
         # === 右侧：演员选择 ===
         right = QWidget()
@@ -1537,7 +1556,7 @@ class WorkbenchPage(QWidget):
 
     def _on_tab_changed(self, idx: int):
         """Tab 切换时更新预览，并在切到重命名 Tab 时重置目录并扫描"""
-        if idx == 3:
+        if idx == 2:
             # 切到图片重命名 Tab：重置目录为项目输出目录
             if self.project:
                 target = self.project.target_base_path
@@ -1986,7 +2005,7 @@ class WorkbenchPage(QWidget):
 
     def _on_rename_actor_changed(self):
         """演员变更时重新计算命名并刷新"""
-        if self.tabs.currentIndex() != 3:
+        if self.tabs.currentIndex() != 2:
             return
         self._recalc_rename_names()
         self._refresh_rename_name_column()
@@ -2093,7 +2112,7 @@ class WorkbenchPage(QWidget):
 
     def _validate_segments(self):
         """校验段内和段间时序，返回 (ok, internals, crosses)"""
-        if not hasattr(self, 'lbl_concat_warn'):
+        if not hasattr(self, 'lbl_vid_warn'):
             return True, [], []
         segs = self._get_segments()
         internals = []  # 段内逆序（硬错误）
@@ -2106,19 +2125,33 @@ class WorkbenchPage(QWidget):
                 crosses.append(f"第{i+1}段结束({segs[i][1]}) > 第{i+2}段起始({segs[i+1][0]})")
         all_warns = internals + crosses
         if all_warns:
-            self.lbl_concat_warn.setText("⚠ " + "; ".join(all_warns))
+            full = "⚠ " + "; ".join(all_warns)
+            self.lbl_vid_warn.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self.lbl_vid_warn.setToolTip(full)
+            fm = self.lbl_vid_warn.fontMetrics()
+            elided = fm.elidedText(full, Qt.ElideRight, self.lbl_vid_warn.maximumWidth())
+            self.lbl_vid_warn.setText(elided)
             return False, internals, crosses
         else:
             n = len(segs)
-            self.lbl_concat_warn.setText(f"✓ {n} 段时间顺序正确" if n > 0 else "")
+            ok_text = "✓" if n > 0 else ""
+            self.lbl_vid_warn.setStyleSheet("color: #27ae60; font-size: 12px;")
+            self.lbl_vid_warn.setText(ok_text)
+            self.lbl_vid_warn.setToolTip("")
             return True, [], []
+
+    def _on_warn_clicked(self, event):
+        """点击警示标签弹出完整内容"""
+        tip = self.lbl_vid_warn.toolTip()
+        if tip:
+            QMessageBox.information(self, "时间校验", tip)
 
     def _load_segments_from_text(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("导入时间段")
         dlg.setMinimumSize(400, 300)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("每行格式: 起始时间,结束时间"))
+        layout.addWidget(QLabel("每行: 起始时间,结束时间"))
         te = QTextEdit()
         te.setPlainText("00:00:00.000,00:00:05.000")
         layout.addWidget(te)
@@ -2220,24 +2253,28 @@ class WorkbenchPage(QWidget):
                 name = f"[{preview_country}]{actors_str} » {movie}.{self.project.year}{se}(1).gif"
                 self.lbl_preview.setText(f"{self.project.target_base_path}\\{name}")
             elif idx == 1:
-                start = self.ed_vid_start.text()
-                end = self.ed_vid_end.text()
-                actors_str = NamingEngine._build_actor_str(display_names)
-                movie = NamingEngine._safe_name(self.project.movie)
-                se = ""
-                ep = self._get_episode()
-                if self.project.is_series and self.project.season is not None:
-                    se = f".S{self.project.season:02d}"
-                    if ep is not None:
-                        se += f"E{ep:02d}"
-                start_fmt = start.replace(':', '.')
-                end_fmt = end.replace(':', '.')
-                name = f"[{preview_country}]{actors_str} » {movie}.{self.project.year}{se} » {start_fmt}-{end_fmt}.mp4"
-                self.lbl_preview.setText(f"{self.project.target_base_path}\\{name}")
-            elif idx == 2:
                 self._validate_segments()
                 segs = self._get_segments()
-                if segs:
+                if not segs:
+                    self.lbl_preview.setText("请输入至少一段")
+                elif len(segs) == 1:
+                    # 单段：直接剪辑，文件名用 - 分隔
+                    start = segs[0][0]
+                    end = segs[0][1]
+                    actors_str = NamingEngine._build_actor_str(display_names)
+                    movie = NamingEngine._safe_name(self.project.movie)
+                    se = ""
+                    ep = self._get_episode()
+                    if self.project.is_series and self.project.season is not None:
+                        se = f".S{self.project.season:02d}"
+                        if ep is not None:
+                            se += f"E{ep:02d}"
+                    start_fmt = start.replace(':', '.')
+                    end_fmt = end.replace(':', '.')
+                    name = f"[{preview_country}]{actors_str} » {movie}.{self.project.year}{se} » {start_fmt}-{end_fmt}.mp4"
+                    self.lbl_preview.setText(f"{self.project.target_base_path}\\{name}")
+                else:
+                    # 多段：拼接导出，文件名用 ~ 分隔
                     actors_str = NamingEngine._build_actor_str(display_names)
                     movie = NamingEngine._safe_name(self.project.movie)
                     se = ""
@@ -2248,9 +2285,7 @@ class WorkbenchPage(QWidget):
                     name = f"[{preview_country}]{actors_str} » {movie}.{self.project.year}{se} » {first_fmt}~{last_fmt}.mp4"
                     self.lbl_preview.setText(
                         f"{self.project.target_base_path}\\{name}  （共 {len(segs)} 段）")
-                else:
-                    self.lbl_preview.setText("请输入至少一段")
-            elif idx == 3:
+            elif idx == 2:
                 # 图片重命名 Tab：显示命名格式（后缀取第一个勾选文件的实际扩展名）
                 actors_str = NamingEngine._build_actor_str(display_names)
                 movie = NamingEngine._safe_name(self.project.movie)
@@ -2279,7 +2314,7 @@ class WorkbenchPage(QWidget):
         idx = self.tabs.currentIndex()
 
         # 图片重命名 Tab 走独立逻辑
-        if idx == 3:
+        if idx == 2:
             self._on_rename_execute()
             return
 
@@ -2299,7 +2334,7 @@ class WorkbenchPage(QWidget):
             dlg.setWindowTitle("选择地区")
             dlg.setMinimumWidth(300)
             dlg_layout = QVBoxLayout(dlg)
-            dlg_layout.addWidget(QLabel("没有选择演员，请指定该剪辑的地区："))
+            dlg_layout.addWidget(QLabel("请指定地区："))
             cb = QComboBox()
             cb.addItems(["CHN", "JAP", "KOR", "WEST", "SLA", "SEA", "LTA"])
             dlg_layout.addWidget(cb)
@@ -2340,18 +2375,6 @@ class WorkbenchPage(QWidget):
             self.worker = Worker(engine, "gif", **kwargs)
 
         elif idx == 1:
-            kwargs = {
-                "proj": temp_proj,
-                "start": self.ed_vid_start.text(),
-                "end": self.ed_vid_end.text(),
-                "copy": self.chk_copy.isChecked(),
-                "no_audio": self.chk_no_audio.isChecked(),
-                "aspect": self.cb_aspect.currentText() if self.chk_aspect.isChecked() else None,
-                "audio_stream": self.spin_audio_idx.value() if self.chk_audio_idx.isChecked() else None,
-            }
-            self.worker = Worker(engine, "cut", **kwargs)
-
-        elif idx == 2:
             segs = self._get_segments()
             if not segs:
                 QMessageBox.warning(self, "提示", "请至少输入一段")
@@ -2361,25 +2384,40 @@ class WorkbenchPage(QWidget):
             ok, internals, crosses = self._validate_segments()
             if internals:
                 QMessageBox.warning(self, "时间错误",
-                    "以下段起始时间≥结束时间，无法执行：\n" + "\n".join(internals))
+                    "起始时间 ≥ 结束时间：\n" + "\n".join(internals))
                 self.btn_run.setEnabled(True)
                 return
             if crosses:
                 reply = QMessageBox.question(self, "时间段重叠",
-                    "存在时间段重叠：\n" + "\n".join(crosses) + "\n\n是否仍然执行？",
+                    "时间段重叠：\n" + "\n".join(crosses) + "\n\n仍然执行？",
                     QMessageBox.Yes | QMessageBox.No)
                 if reply != QMessageBox.Yes:
                     self.btn_run.setEnabled(True)
                     return
-            kwargs = {
-                "proj": temp_proj,
-                "segments": segs,
-                "copy": self.chk_concat_copy.isChecked(),
-                "no_audio": self.chk_concat_no_audio.isChecked(),
-                "aspect": self.cb_concat_aspect.currentText() if self.chk_concat_aspect.isChecked() else None,
-                "audio_stream": self.spin_concat_audio_idx.value() if self.chk_concat_audio_idx.isChecked() else None,
-            }
-            self.worker = Worker(engine, "concat", **kwargs)
+
+            if len(segs) == 1:
+                # 单段直接剪辑
+                kwargs = {
+                    "proj": temp_proj,
+                    "start": segs[0][0],
+                    "end": segs[0][1],
+                    "copy": self.chk_copy.isChecked(),
+                    "no_audio": self.chk_no_audio.isChecked(),
+                    "aspect": self.cb_aspect.currentText() if self.chk_aspect.isChecked() else None,
+                    "audio_stream": self.spin_audio_idx.value() if self.chk_audio_idx.isChecked() else None,
+                }
+                self.worker = Worker(engine, "cut", **kwargs)
+            else:
+                # 多段拼接
+                kwargs = {
+                    "proj": temp_proj,
+                    "segments": segs,
+                    "copy": self.chk_copy.isChecked(),
+                    "no_audio": self.chk_no_audio.isChecked(),
+                    "aspect": self.cb_aspect.currentText() if self.chk_aspect.isChecked() else None,
+                    "audio_stream": self.spin_audio_idx.value() if self.chk_audio_idx.isChecked() else None,
+                }
+                self.worker = Worker(engine, "concat", **kwargs)
 
         self.worker.log_signal.connect(self.log)
         self.worker.done_signal.connect(self._on_done)
@@ -2421,7 +2459,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Movie Toolkit")
-        self.setMinimumSize(800, 700)
+        self.resize(480, 420)
+
+        # 居中显示
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move((screen.width() - 480) // 2, (screen.height() - 420) // 2)
 
         # 设置窗口图标
         icon_path = Path(__file__).parent / "icon.svg"
@@ -2447,10 +2489,12 @@ class MainWindow(QMainWindow):
     def _enter_workbench(self, project: Project):
         self.workbench.load_project(project)
         self.stack.setCurrentIndex(1)
+        self.showMaximized()
 
     def _back_to_list(self):
         self.list_page._refresh_list()
         self.stack.setCurrentIndex(0)
+        self.showNormal()
 
 
 
@@ -2478,5 +2522,5 @@ if __name__ == "__main__":
     app.setFont(font)
 
     win = MainWindow()
-    win.showMaximized()
+    win.show()
     sys.exit(app.exec_())

@@ -252,11 +252,11 @@ class Project:
 
     @property
     def short_name(self) -> str:
-        """列表显示：影视名.年份（不含演员）"""
+        """列表显示：[年份]名称（不含演员）"""
         se = ""
         if self.is_series and self.season is not None:
             se = f" S{self.season:02d}"
-        return f"{self.movie}.{self.year}{se}"
+        return f"[{self.year}]{self.movie}{se}"
 
 
 class ProjectManager:
