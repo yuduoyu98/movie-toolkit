@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- 电影胶片框 -->
+  <rect x="4" y="8" width="56" height="48" rx="4" ry="4" fill="#2c3e50" stroke="#1a252f" stroke-width="2"/>
+  <!-- 胶片齿孔 左侧 -->
+  <rect x="8" y="14" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <rect x="8" y="24" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <rect x="8" y="34" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <rect x="8" y="44" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <!-- 胶片齿孔 右侧 -->
+  <rect x="52" y="14" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <rect x="52" y="24" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <rect x="52" y="34" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <rect x="52" y="44" width="4" height="6" rx="1" fill="#ecf0f1"/>
+  <!-- 剪刀图标 -->
+  <g transform="translate(22,20)" fill="none" stroke="#e74c3c" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 左刀片 -->
+    <circle cx="6" cy="4" r="4" fill="none"/>
+    <line x1="6" y1="8" x2="10" y2="18"/>
+    <!-- 右刀片 -->
+    <circle cx="14" cy="4" r="4" fill="none"/>
+    <line x1="14" y1="8" x2="10" y2="18"/>
+    <!-- 交叉点圆形 -->
+    <circle cx="10" cy="18" r="1.5" fill="#e74c3c"/>
+  </g>
+</svg>
