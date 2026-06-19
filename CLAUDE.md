@@ -85,6 +85,18 @@ Filters: `eq=contrast={c}:brightness={b},setpts={speed}*PTS,fps={fps},scale={wid
 ffmpeg -y -f concat -i "tmp/concat/filelist.txt" -c copy "{output}"
 ```
 
+## Recent Changes (2026-06-19/20)
+
+- **Tabs merged** — Video Cut + Concat into one "视频剪辑" tab. Single segment → `-` separator; multi-segment → `~` separator.
+- **Parallel tasks** — GIF、video、concat run in independent threads; log tagged `[GIF]`/`[视频]`/`[拼接]`; no button disable.
+- **Dark mode** — `QPalette`-based toggle (🌙/☀), auto-detect 18:00–05:59, persisted to `.filmcutter_config.json`.
+- **Project list** — Search box, bold `[Year]Name` format, per-row edit/delete, small-window startup → maximize on enter.
+- **Actor sync** — `_save_tab_actors` uses triggering tab as truth (not union). `set_project_actor_ids` syncs `project_actor_ids` + `selected_actor_ids` + completer. Selection ≠ unbinding.
+- **Image rename** — Regex `^\[[A-Z]{2,4}\]` detects already-renamed files. Status column: green new name / orange "未重命名" / gray "已重命名". Search auto-selects matching non-renamed files. Sort by time/name with ↑↓ toggle. jpg/png filter checkboxes. "隐藏已重命名的图片" default on.
+- **State persistence** — Workbench parameters (segments, GIF options, actors, tab) saved per-project to `state_{slug}.json`.
+- **Video segments** — Copy selected rows in import format (`start,end` per line). Error shown as red ✗ with tooltip.
+- **`_safe_name`** — Replaces `:` with `：` (Chinese colon), strips surrounding spaces first.
+
 ## Known Differences from v0
 
 - GIF: v0 uses two-pass palette (separate palettegen → paletteuse); core uses single-pass filter graph. Functionally equivalent.

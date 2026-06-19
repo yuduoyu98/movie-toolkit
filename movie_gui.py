@@ -58,6 +58,8 @@ QLayout = QtWidgets.QLayout
 QSize = QtCore.QSize
 QRect = QtCore.QRect
 QFont = QtGui.QFont
+QPalette = QtGui.QPalette
+QColor = QtGui.QColor
 from movie_core import (
     Actor, ActorManager, Project, ProjectManager,
     NamingEngine, FFmpegEngine, PathHelper
@@ -446,6 +448,9 @@ class ActorSelector(QWidget):
     def set_project_actor_ids(self, ids: List[int]):
         """标记哪些演员已绑定到项目（用于搜索区分），并刷新标签"""
         self.project_actor_ids = list(ids)
+        # 清理已解绑的演员（不在 project 中的也移出 selected）
+        self.selected_actor_ids = [a for a in self.selected_actor_ids if a in self.project_actor_ids]
+        self._refresh_completer()
         self._refresh_tags()
 
     def _build_ui(self):
@@ -464,7 +469,9 @@ class ActorSelector(QWidget):
         self.completer = QCompleter()
         self.completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.completer.setFilterMode(Qt.MatchContains)
+        self.completer.setCompletionMode(QCompleter.PopupCompletion)
         self.ed_search.setCompleter(self.completer)
+        self.ed_search.textChanged.connect(lambda: self.completer.complete())
         self._refresh_completer()
 
         btn_new = QPushButton("新增")
@@ -575,6 +582,21 @@ class ActorSelector(QWidget):
             list_widget.addItem(item)
         layout.addWidget(list_widget)
 
+        # 双击绑定演员并关闭
+        def on_double_click(item):
+            actor_id = item.data(Qt.UserRole)
+            if actor_id is None:
+                return
+            if actor_id not in self.selected_actor_ids:
+                self.selected_actor_ids.append(actor_id)
+            if actor_id not in self.project_actor_ids:
+                self.project_actor_ids.append(actor_id)
+            self._refresh_tags()
+            self.actors_changed.emit()
+            dlg.accept()
+
+        list_widget.itemDoubleClicked.connect(on_double_click)
+
         btn_bar = QHBoxLayout()
 
         btn_edit = QPushButton("编辑")
@@ -658,17 +680,15 @@ class ActorSelector(QWidget):
             tag = QFrame()
             if is_selected:
                 tag.setStyleSheet(
-                    "QFrame { background-color: #e8edf2; "
-                    "border: 1px solid #2980b9; border-radius: 8px; "
+                    "QFrame { border: 1px solid #2980b9; border-radius: 8px; "
                     "padding: 2px 8px; }"
-                    "QFrame:hover { background-color: #d0dbe8; }"
+                    "QFrame:hover { border-color: #2471a3; }"
                 )
             else:
                 tag.setStyleSheet(
-                    "QFrame { background-color: #f5f5f5; "
-                    "border: 1px solid #e0e0e0; border-radius: 8px; "
+                    "QFrame { border: 1px solid #555; border-radius: 8px; "
                     "padding: 2px 8px; }"
-                    "QFrame:hover { background-color: #e8edf2; border-color: #2980b9; }"
+                    "QFrame:hover { border-color: #2980b9; }"
                 )
             tag_layout = QHBoxLayout(tag)
             tag_layout.setContentsMargins(6, 2, 6, 2)
@@ -676,9 +696,9 @@ class ActorSelector(QWidget):
 
             lbl = QLabel(tag_text)
             if is_selected:
-                lbl.setStyleSheet("color: #333; font-size: 12px; border: none;")
+                lbl.setStyleSheet("font-size: 12px; border: none;")
             else:
-                lbl.setStyleSheet("color: #bbb; font-size: 12px; border: none;")
+                lbl.setStyleSheet("color: #888; font-size: 12px; border: none;")
             tag_layout.addWidget(lbl)
 
             # 已选中的标签：左移/右移箭头
@@ -915,6 +935,7 @@ class ProjectDialog(QDialog):
 class ProjectListPage(QWidget):
     """项目列表页"""
     project_selected = pyqtSignal(Project)
+    theme_toggled = pyqtSignal()
 
     def __init__(self, manager: ProjectManager, actor_manager: ActorManager):
         super().__init__()
@@ -928,9 +949,23 @@ class ProjectListPage(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
+        title_row = QHBoxLayout()
         title = QLabel("影片项目")
-        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #2c3e50;")
-        layout.addWidget(title)
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        title_row.addWidget(title, stretch=1)
+
+        self.btn_theme_list = QPushButton("🌙")
+        self.btn_theme_list.setObjectName("btn_theme_list")
+        self.btn_theme_list.setFixedSize(32, 32)
+        self.btn_theme_list.setToolTip("切换夜间模式")
+        self.btn_theme_list.setStyleSheet(
+            "QPushButton { font-size: 16px; border: none; background: transparent; }"
+            "QPushButton:hover { background: #e0e0e0; border-radius: 16px; }"
+        )
+        self.btn_theme_list.clicked.connect(self.theme_toggled.emit)
+        title_row.addWidget(self.btn_theme_list)
+
+        layout.addLayout(title_row)
 
         # 搜索框
         self.ed_search = QLineEdit()
@@ -990,7 +1025,7 @@ class ProjectListPage(QWidget):
         h.setSpacing(8)
 
         name_lbl = QLabel(p.short_name)
-        name_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50;")
+        name_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         name_lbl.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
         name_lbl.mouseDoubleClickEvent = lambda ev: self._on_open()
         h.addWidget(name_lbl, stretch=1)
@@ -1000,7 +1035,7 @@ class ProjectListPage(QWidget):
         btn_edit.setStyleSheet(
             "QPushButton { font-size: 12px; padding: 4px 8px; color: #2980b9; "
             "border: 1px solid #2980b9; border-radius: 4px; background: transparent; }"
-            "QPushButton:hover { background: #eaf2f8; }"
+            "QPushButton:hover { color: white; background: #2980b9; }"
         )
         btn_edit.clicked.connect(lambda checked, pid=p.id: self._on_edit_project(pid))
         h.addWidget(btn_edit)
@@ -1010,7 +1045,7 @@ class ProjectListPage(QWidget):
         btn_del.setStyleSheet(
             "QPushButton { font-size: 12px; padding: 4px 8px; color: #c0392b; "
             "border: 1px solid #c0392b; border-radius: 4px; background: transparent; }"
-            "QPushButton:hover { background: #fdf2f2; }"
+            "QPushButton:hover { color: white; background: #c0392b; }"
         )
         btn_del.clicked.connect(lambda checked, pid=p.id: self._on_delete_project(pid))
         h.addWidget(btn_del)
@@ -1109,13 +1144,14 @@ class ProjectListPage(QWidget):
 class WorkbenchPage(QWidget):
     """剪辑工作台：剪辑时强制要求演员"""
     back_signal = pyqtSignal()
+    theme_toggled = pyqtSignal()
 
     def __init__(self, manager: ProjectManager, actor_manager: ActorManager):
         super().__init__()
         self.manager = manager
         self.actor_manager = actor_manager
         self.project: Optional[Project] = None
-        self.worker: Optional[Worker] = None
+        self._workers: list = []  # 后台任务列表，支持并行
         self._build_ui()
 
     def _build_ui(self):
@@ -1127,7 +1163,7 @@ class WorkbenchPage(QWidget):
         info_bar = QHBoxLayout()
 
         self.lbl_proj_title = QLabel("-")
-        self.lbl_proj_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+        self.lbl_proj_title.setStyleSheet("font-size: 16px; font-weight: bold;")
         info_bar.addWidget(self.lbl_proj_title, stretch=1)
 
         btn_edit = QPushButton("编辑")
@@ -1143,6 +1179,17 @@ class WorkbenchPage(QWidget):
         btn_back = QPushButton("退出")
         btn_back.clicked.connect(self.back_signal.emit)
         info_bar.addWidget(btn_back)
+
+        btn_theme = QPushButton("🌙")
+        btn_theme.setObjectName("btn_theme_wb")
+        btn_theme.setFixedSize(32, 32)
+        btn_theme.setToolTip("切换夜间模式")
+        btn_theme.setStyleSheet(
+            "QPushButton { font-size: 16px; border: none; background: transparent; }"
+            "QPushButton:hover { background: #e0e0e0; border-radius: 16px; }"
+        )
+        btn_theme.clicked.connect(self.theme_toggled.emit)
+        info_bar.addWidget(btn_theme)
 
         layout.addLayout(info_bar)
 
@@ -1191,7 +1238,7 @@ class WorkbenchPage(QWidget):
         self.lbl_preview = QLabel("-")
         self.lbl_preview.setStyleSheet(
             "font-family: Consolas, Monaco, monospace; "
-            "font-size: 13px; color: #27ae60; background: #f8f9fa; "
+            "font-size: 13px; color: #27ae60; "
             "padding: 8px; border-radius: 4px;"
         )
         self.lbl_preview.setWordWrap(True)
@@ -1248,6 +1295,106 @@ class WorkbenchPage(QWidget):
         self._update_preview()
         self.txt_log.clear()
         self.log(f"[INFO] 进入工作台: {project.display_name}")
+
+        # 恢复上次状态
+        self._restore_state()
+
+    def _save_state(self):
+        """保存当前工作台状态到数据库"""
+        if not self.project:
+            return
+        import json
+        segs = []
+        if hasattr(self, 'table_segments'):
+            segs = self._get_segments()
+        state = {
+            "tab": self.tabs.currentIndex(),
+            "gif": {
+                "start": self.ed_gif_start.text(),
+                "end": self.ed_gif_end.text(),
+                "width": self.cb_gif_width.currentText(),
+                "fps": self.cb_gif_fps.currentText(),
+                "colors": self.cb_gif_colors.currentText(),
+                "brightness_enabled": self.chk_brightness.isChecked(),
+                "brightness": self.spin_brightness.value(),
+                "contrast_enabled": self.chk_contrast.isChecked(),
+                "contrast": self.spin_contrast.value(),
+                "speed_enabled": self.chk_speed.isChecked(),
+                "speed": self.spin_speed.value(),
+            },
+            "video": {
+                "segments": segs,
+                "copy": self.chk_copy.isChecked(),
+                "no_audio": self.chk_no_audio.isChecked(),
+                "aspect_enabled": self.chk_aspect.isChecked(),
+                "aspect": self.cb_aspect.currentText(),
+                "audio_idx_enabled": self.chk_audio_idx.isChecked(),
+                "audio_idx": self.spin_audio_idx.value(),
+            },
+            "actors_per_tab": {}
+        }
+        for i in range(self.tabs.count()):
+            sel = self.tabs.widget(i).findChild(ActorSelector)
+            if sel:
+                state["actors_per_tab"][str(i)] = sel.get_actor_ids()
+        self.manager.save_state(self.project.id, json.dumps(state, ensure_ascii=False))
+
+    def _restore_state(self):
+        """从数据库恢复上次工作台状态"""
+        if not self.project:
+            return
+        import json
+        raw = self.manager.load_state(self.project.id)
+        if not raw:
+            return
+        try:
+            state = json.loads(raw)
+        except Exception:
+            return
+        # 恢复 GIF 参数
+        g = state.get("gif", {})
+        if g:
+            self.ed_gif_start.setText(g.get("start", "00:00:00.000"))
+            self.ed_gif_end.setText(g.get("end", "00:00:05.000"))
+            self.cb_gif_width.setCurrentText(g.get("width", "600"))
+            self.cb_gif_fps.setCurrentText(g.get("fps", "30"))
+            self.cb_gif_colors.setCurrentText(g.get("colors", "256"))
+            self.chk_brightness.setChecked(g.get("brightness_enabled", False))
+            self.spin_brightness.setValue(g.get("brightness", 0))
+            self.chk_contrast.setChecked(g.get("contrast_enabled", False))
+            self.spin_contrast.setValue(g.get("contrast", 1))
+            self.chk_speed.setChecked(g.get("speed_enabled", False))
+            self.spin_speed.setValue(g.get("speed", 1))
+        # 恢复视频参数
+        v = state.get("video", {})
+        if v:
+            self.chk_copy.setChecked(v.get("copy", False))
+            self.chk_no_audio.setChecked(v.get("no_audio", False))
+            self.chk_aspect.setChecked(v.get("aspect_enabled", False))
+            self.cb_aspect.setCurrentText(v.get("aspect", "16:9"))
+            self.chk_audio_idx.setChecked(v.get("audio_idx_enabled", False))
+            self.spin_audio_idx.setValue(v.get("audio_idx", 1))
+            segs = v.get("segments", [])
+            if segs and hasattr(self, 'table_segments'):
+                self.table_segments.blockSignals(True)
+                self.table_segments.setRowCount(0)
+                for s, e in segs:
+                    r = self.table_segments.rowCount()
+                    self.table_segments.insertRow(r)
+                    self.table_segments.setItem(r, 0, QTableWidgetItem(s))
+                    self.table_segments.setItem(r, 1, QTableWidgetItem(e))
+                self.table_segments.blockSignals(False)
+        # 恢复各 Tab 演员选择
+        ap = state.get("actors_per_tab", {})
+        for i_str, ids in ap.items():
+            i = int(i_str)
+            if i < self.tabs.count():
+                sel = self.tabs.widget(i).findChild(ActorSelector)
+                if sel:
+                    sel.set_actor_ids(ids)
+        # 恢复 Tab
+        self.tabs.setCurrentIndex(state.get("tab", 0))
+        self._update_preview()
 
     def _on_edit_project(self):
         if not self.project:
@@ -1401,6 +1548,10 @@ class WorkbenchPage(QWidget):
         btn_sort.setToolTip("按起始时间排序")
         btn_sort.clicked.connect(self._sort_segments)
         btn_bar.addWidget(btn_sort)
+        btn_copy = QPushButton("复制")
+        btn_copy.setToolTip("复制选中段（导入格式）")
+        btn_copy.clicked.connect(self._copy_segments)
+        btn_bar.addWidget(btn_copy)
         btn_bar.addStretch()
         self.lbl_vid_warn = QLabel("")
         self.lbl_vid_warn.setStyleSheet("color: #e67e22; font-size: 12px;")
@@ -1476,12 +1627,12 @@ class WorkbenchPage(QWidget):
 
         # 目录选择行
         dir_row = QHBoxLayout()
-        dir_row.addWidget(QLabel("目录:"))
+        dir_row.addWidget(QLabel("图片目录:"))
         self.ed_rename_dir = QLineEdit()
         self.ed_rename_dir.setPlaceholderText("默认为项目输出目录，可临时修改…")
         self.ed_rename_dir.setToolTip("修改后点击「刷新」扫描新目录")
         dir_row.addWidget(self.ed_rename_dir, stretch=1)
-        btn_browse_dir = QPushButton("浏览...")
+        btn_browse_dir = QPushButton("浏览")
         btn_browse_dir.clicked.connect(self._pick_rename_dir)
         dir_row.addWidget(btn_browse_dir)
         btn_refresh = QPushButton("刷新")
@@ -1502,15 +1653,44 @@ class WorkbenchPage(QWidget):
         self.lbl_rename_count.setStyleSheet("color: #7f8c8d;")
         view_row.addWidget(self.lbl_rename_count)
 
-        view_row.addStretch()
-
         btn_sel_all = QPushButton("全选")
         btn_sel_all.clicked.connect(lambda: self._select_all_rename(True))
         view_row.addWidget(btn_sel_all)
-        btn_sel_none = QPushButton("取消全选")
+        btn_sel_none = QPushButton("清除全选")
         btn_sel_none.clicked.connect(lambda: self._select_all_rename(False))
         view_row.addWidget(btn_sel_none)
         left_layout.addLayout(view_row)
+
+        # 排序 + 过滤选项
+        sort_row = QHBoxLayout()
+
+        self.btn_sort_time = QPushButton("时间 ↓")
+        self.btn_sort_time.setToolTip("按修改时间排序，点击切换正/逆序")
+        self.btn_sort_time.clicked.connect(lambda: self._sort_rename("time"))
+        sort_row.addWidget(self.btn_sort_time)
+        self.btn_sort_name = QPushButton("名称 ↑")
+        self.btn_sort_name.setToolTip("按文件名排序，点击切换正/逆序")
+        self.btn_sort_name.clicked.connect(lambda: self._sort_rename("name"))
+        sort_row.addWidget(self.btn_sort_name)
+
+        sort_row.addSpacing(16)
+
+        self.chk_hide_renamed = QCheckBox("隐藏已重命名的图片")
+        self.chk_hide_renamed.setChecked(True)
+        self.chk_hide_renamed.stateChanged.connect(lambda: self._populate_rename_views())
+        sort_row.addWidget(self.chk_hide_renamed)
+
+        self.chk_ext_jpg = QCheckBox("jpg")
+        self.chk_ext_jpg.setChecked(True)
+        self.chk_ext_jpg.stateChanged.connect(lambda: self._populate_rename_views())
+        sort_row.addWidget(self.chk_ext_jpg)
+        self.chk_ext_png = QCheckBox("png")
+        self.chk_ext_png.setChecked(True)
+        self.chk_ext_png.stateChanged.connect(lambda: self._populate_rename_views())
+        sort_row.addWidget(self.chk_ext_png)
+
+        sort_row.addStretch()
+        left_layout.addLayout(sort_row)
 
         # 详细列表（缩略图 + 文件名 + 新文件名）
         self.detail_table = QTableWidget(0, 4)
@@ -1548,11 +1728,38 @@ class WorkbenchPage(QWidget):
         hbox.addWidget(right, stretch=4)
 
         # 内部状态
-        self._rename_items = []          # [{path, checked, new_name, size}, ...]
+        self._rename_items = []          # [{path, checked, new_name, size, mtime, is_renamed}, ...]
         self._rename_dir = ""
         self._rename_filtered = []       # 当前过滤后可见的 _rename_items 索引列表
+        self._rename_sort = ("time", False)  # (mode, ascending)，默认时间倒序
+        self._rename_force_country = ""  # 无演员时强制使用的地区
 
         return tab
+
+    def _sort_rename_items(self):
+        """按当前排序方式排列 _rename_items"""
+        mode, asc = self._rename_sort
+        reverse = not asc
+        if mode == "time":
+            self._rename_items.sort(key=lambda it: it.get("mtime", 0), reverse=reverse)
+        else:
+            self._rename_items.sort(key=lambda it: it["path"].name.lower(), reverse=reverse)
+
+    def _sort_rename(self, mode: str):
+        """切换排序方式，同模式则切换正/逆序"""
+        cur_mode, cur_asc = self._rename_sort
+        if mode == cur_mode:
+            self._rename_sort = (mode, not cur_asc)
+        else:
+            self._rename_sort = (mode, mode == "name")  # 名称默认正序，时间默认倒序
+        # 更新按钮箭头
+        t_asc = self._rename_sort == ("time", True)
+        n_asc = self._rename_sort == ("name", True)
+        self.btn_sort_time.setText("时间 " + ("↑" if t_asc else "↓"))
+        self.btn_sort_name.setText("名称 " + ("↑" if n_asc else "↓"))
+        self._sort_rename_items()
+        self._populate_rename_views()
+        self._update_preview()
 
     def _on_tab_changed(self, idx: int):
         """Tab 切换时更新预览，并在切到重命名 Tab 时重置目录并扫描"""
@@ -1592,27 +1799,33 @@ class WorkbenchPage(QWidget):
             src = Path(self.project.source_file_path)
             keyword = src.name  # e.g. "ABC-123.mp4"
 
-        # 图片扩展名
-        IMG_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'}
+        # 只处理 jpg / png
+        IMG_EXTS = {'.png', '.jpg', '.jpeg'}
+        import re
+        # 已重命名的文件：匹配 [Country]... 格式
+        RENAMED_RE = re.compile(r'^\[[A-Z]{2,4}\]')
 
         items = []
-        for f in sorted(scan_dir.iterdir()):
+        for f in scan_dir.iterdir():
             if not f.is_file():
                 continue
             if f.suffix.lower() not in IMG_EXTS:
                 continue
-            # 判断是否"未命名"：文件名以源视频关键词开头
-            is_unnamed = False
-            if keyword:
-                is_unnamed = f.name.startswith(keyword) or f.name.startswith(Path(keyword).stem)
+            is_renamed = bool(RENAMED_RE.match(f.name))
+            # 未重命名且匹配源视频关键词 → 默认勾选
+            is_unnamed = bool(not is_renamed and keyword and
+                             (f.name.startswith(keyword) or f.name.startswith(Path(keyword).stem)))
             items.append({
                 "path": f,
-                "checked": is_unnamed,  # 未命名图片默认勾选
+                "checked": is_unnamed,
                 "new_name": "",
                 "size": f.stat().st_size,
+                "mtime": f.stat().st_mtime,
+                "is_renamed": is_renamed,
             })
 
         self._rename_items = items
+        self._sort_rename_items()
         self._populate_rename_views()
         self._update_preview()
 
@@ -1623,15 +1836,33 @@ class WorkbenchPage(QWidget):
 
         self._recalc_rename_names()
 
-        # 构建过滤索引列表（区分大小写的前缀匹配）
-        filter_text = self.ed_rename_filter.text().strip() if hasattr(self, 'ed_rename_filter') else ""
+        # 构建过滤索引列表（子串匹配，忽略大小写）
+        filter_text = self.ed_rename_filter.text().strip().lower() if hasattr(self, 'ed_rename_filter') else ""
         if filter_text:
             self._rename_filtered = [
                 i for i, it in enumerate(self._rename_items)
-                if it["path"].name.startswith(filter_text)
+                if filter_text in it["path"].name.lower()
             ]
         else:
             self._rename_filtered = list(range(len(self._rename_items)))
+        # 隐藏已重命名
+        if hasattr(self, 'chk_hide_renamed') and self.chk_hide_renamed.isChecked():
+            self._rename_filtered = [
+                i for i in self._rename_filtered
+                if not self._rename_items[i].get("is_renamed")
+            ]
+        # 按后缀筛选
+        if hasattr(self, 'chk_ext_jpg'):
+            allowed = set()
+            if self.chk_ext_jpg.isChecked():
+                allowed.update({'.jpg', '.jpeg'})
+            if self.chk_ext_png.isChecked():
+                allowed.add('.png')
+            if allowed:
+                self._rename_filtered = [
+                    i for i in self._rename_filtered
+                    if self._rename_items[i]["path"].suffix.lower() in allowed
+                ]
 
         self.detail_table.blockSignals(True)
         self.detail_table.setRowCount(0)
@@ -1644,6 +1875,8 @@ class WorkbenchPage(QWidget):
             # 复选框
             chk = QCheckBox()
             chk.setChecked(item["checked"])
+            if item.get("is_renamed"):
+                chk.setToolTip("已按命名规则重命名")
             chk.stateChanged.connect(lambda state, p=str(fpath): self._on_rename_check_toggled(p, state == Qt.Checked))
             self.detail_table.setCellWidget(row, 0, chk)
 
@@ -1658,12 +1891,18 @@ class WorkbenchPage(QWidget):
             name_item.setToolTip(str(fpath))
             self.detail_table.setItem(row, 2, name_item)
 
-            # 新文件名
-            new_item = QTableWidgetItem(item["new_name"] or ("(待重命名)" if item["checked"] else "(跳过)"))
+            # 状态 / 新文件名
             if item["checked"]:
-                new_item.setForeground(QtGui.QColor("#27ae60"))
+                status_text = item["new_name"] or "(待重命名)"
+                status_color = "#27ae60"
+            elif item.get("is_renamed"):
+                status_text = "已重命名"
+                status_color = "#95a5a6"
             else:
-                new_item.setForeground(QtGui.QColor("#bdc3c7"))
+                status_text = "未重命名"
+                status_color = "#e67e22"
+            new_item = QTableWidgetItem(status_text)
+            new_item.setForeground(QtGui.QColor(status_color))
             self.detail_table.setItem(row, 3, new_item)
 
         self.detail_table.blockSignals(False)
@@ -1671,11 +1910,16 @@ class WorkbenchPage(QWidget):
         # 更新计数标签
         checked = sum(1 for it in self._rename_items if it["checked"])
         total = len(self._rename_items)
+        renamed = sum(1 for it in self._rename_items if it.get("is_renamed"))
         shown = len(self._rename_filtered)
+        parts = [f"已选 {checked}"]
+        if renamed:
+            parts.append(f"已重命名 {renamed}")
         if shown < total:
-            self.lbl_rename_count.setText(f"显示 {shown}/{total} 个文件，已选 {checked} 个")
+            parts.insert(0, f"显示 {shown}/{total}")
         else:
-            self.lbl_rename_count.setText(f"{total} 个文件，已选 {checked} 个")
+            parts.insert(0, f"共 {total}")
+        self.lbl_rename_count.setText("  |  ".join(parts))
 
         # 延迟分批加载缩略图，避免阻塞 UI
         self._lazy_thumb_batch = 0
@@ -1714,7 +1958,7 @@ class WorkbenchPage(QWidget):
         if self._lazy_thumb_batch < self._lazy_thumb_total:
             QTimer.singleShot(10, self._lazy_load_thumbnails)
 
-    def _recalc_rename_names(self):
+    def _recalc_rename_names(self, force_country: str = ""):
         """为勾选的文件计算新文件名（Project 复用，编号自动顺延已有文件）"""
         if not self._rename_items:
             return
@@ -1730,6 +1974,8 @@ class WorkbenchPage(QWidget):
                 first = self.actor_manager.get(actor_ids[0])
                 if first:
                     country = first.country
+            if not country:
+                country = force_country or self._rename_force_country
             proj = Project(self.project._data.copy())
             proj.set_actor_ids(actor_ids)
             proj._actor_display_names = display_names
@@ -1910,35 +2156,39 @@ class WorkbenchPage(QWidget):
 
 
     def _on_rename_check_toggled(self, file_path: str, checked: bool):
-        """复选框切换：更新模型，仅刷新名称列，不重建表格"""
+        """复选框切换：更新模型并重建表格"""
         for item in self._rename_items:
             if str(item["path"]) == file_path:
                 item["checked"] = checked
                 break
         self._recalc_rename_names()
-        self._refresh_rename_name_column()
+        self._populate_rename_views()
         self._update_preview()
 
     def _select_all_rename(self, checked: bool):
-        """全选 / 取消全选（仅作用于当前过滤显示的项）"""
+        """全选 / 清除全选（仅作用于当前过滤显示的项，全选时跳过已重命名）"""
         for idx in self._rename_filtered:
             if idx < len(self._rename_items):
+                if checked and self._rename_items[idx].get("is_renamed"):
+                    continue
                 self._rename_items[idx]["checked"] = checked
         self._recalc_rename_names()
-        # 更新表格中的复选框和文件名列
-        self.detail_table.blockSignals(True)
-        for row in range(self.detail_table.rowCount()):
-            chk = self.detail_table.cellWidget(row, 0)
-            if isinstance(chk, QCheckBox):
-                chk.blockSignals(True)
-                chk.setChecked(checked)
-                chk.blockSignals(False)
-        self.detail_table.blockSignals(False)
-        self._refresh_rename_name_column()
+        self._populate_rename_views()
         self._update_preview()
 
     def _on_rename_filter_changed(self, text: str):
-        """搜索文字变化：重新过滤并重建表格"""
+        """搜索文字变化：先全部取消，再仅选中搜索结果中未重命名的文件"""
+        t = text.strip().lower()
+        if t:
+            # 全部取消
+            for it in self._rename_items:
+                it["checked"] = False
+            # 搜索结果中未重命名的自动勾选
+            matching = [i for i, it in enumerate(self._rename_items) if t in it["path"].name.lower()]
+            for idx in matching:
+                if not self._rename_items[idx].get("is_renamed"):
+                    self._rename_items[idx]["checked"] = True
+            self._recalc_rename_names()
         self._populate_rename_views()
         self._update_preview()
 
@@ -1967,31 +2217,6 @@ class WorkbenchPage(QWidget):
         elif action == act_copy_path:
             QApplication.clipboard().setText(str(fpath))
 
-    def _refresh_rename_name_column(self):
-        """仅刷新表格第4列（新文件名），不重建缩略图等"""
-        if not hasattr(self, 'detail_table'):
-            return
-        self.detail_table.blockSignals(True)
-        for row, idx in enumerate(self._rename_filtered):
-            if row >= self.detail_table.rowCount() or idx >= len(self._rename_items):
-                break
-            item = self._rename_items[idx]
-            new_item = QTableWidgetItem(item["new_name"] or ("(待重命名)" if item["checked"] else "(跳过)"))
-            if item["checked"]:
-                new_item.setForeground(QtGui.QColor("#27ae60"))
-            else:
-                new_item.setForeground(QtGui.QColor("#bdc3c7"))
-            self.detail_table.setItem(row, 3, new_item)
-        self.detail_table.blockSignals(False)
-        # 更新计数
-        checked = sum(1 for it in self._rename_items if it["checked"])
-        total = len(self._rename_items)
-        shown = len(self._rename_filtered)
-        if shown < total:
-            self.lbl_rename_count.setText(f"显示 {shown}/{total} 个文件，已选 {checked} 个")
-        else:
-            self.lbl_rename_count.setText(f"{total} 个文件，已选 {checked} 个")
-
     def _pick_rename_dir(self):
         """浏览选择目录"""
         start = self.ed_rename_dir.text().strip() or (
@@ -2008,7 +2233,7 @@ class WorkbenchPage(QWidget):
         if self.tabs.currentIndex() != 2:
             return
         self._recalc_rename_names()
-        self._refresh_rename_name_column()
+        self._populate_rename_views()
         self._update_preview()
 
     def _on_rename_execute(self):
@@ -2021,6 +2246,35 @@ class WorkbenchPage(QWidget):
         if not checked_items:
             QMessageBox.warning(self, "提示", "请至少勾选一个文件")
             return
+
+        # 无演员时弹窗选地区（与视频剪辑一致）
+        sel = self._get_current_actor_selector()
+        actor_ids = sel.get_actor_ids() if sel else []
+        rename_country = ""
+        if actor_ids:
+            first = self.actor_manager.get(actor_ids[0])
+            if first:
+                rename_country = first.country
+        if not rename_country:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("选择地区")
+            dlg.setMinimumWidth(300)
+            dlg_layout = QVBoxLayout(dlg)
+            dlg_layout.addWidget(QLabel("请指定地区："))
+            cb = QComboBox()
+            cb.addItems(["CHN", "JAP", "KOR", "WEST", "SLA", "SEA", "LTA"])
+            dlg_layout.addWidget(cb)
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            dlg_layout.addWidget(btns)
+            if dlg.exec_() != QDialog.Accepted:
+                return
+            self._rename_force_country = cb.currentText()
+            # 用选定的地区重新计算命名并刷新
+            self._populate_rename_views()
+            # 重新获取 checked_items（new_name 已更新）
+            checked_items = [it for it in self._rename_items if it["checked"]]
 
         # 确认
         msg = f"将重命名 {len(checked_items)} 个文件，确认执行？"
@@ -2110,6 +2364,21 @@ class WorkbenchPage(QWidget):
         self._update_preview()
         self._validate_segments()
 
+    def _copy_segments(self):
+        """复制选中段到剪贴板（导入格式: 起始时间,结束时间）"""
+        rows = sorted(set(idx.row() for idx in self.table_segments.selectedIndexes()))
+        if not rows:
+            return
+        lines = []
+        for r in rows:
+            s = self.table_segments.item(r, 0)
+            e = self.table_segments.item(r, 1)
+            if s and e:
+                lines.append(f"{s.text().strip()},{e.text().strip()}")
+        if lines:
+            QApplication.clipboard().setText("\n".join(lines))
+            self.log(f"[复制] 已复制 {len(lines)} 段时间到剪贴板")
+
     def _validate_segments(self):
         """校验段内和段间时序，返回 (ok, internals, crosses)"""
         if not hasattr(self, 'lbl_vid_warn'):
@@ -2125,17 +2394,15 @@ class WorkbenchPage(QWidget):
                 crosses.append(f"第{i+1}段结束({segs[i][1]}) > 第{i+2}段起始({segs[i+1][0]})")
         all_warns = internals + crosses
         if all_warns:
-            full = "⚠ " + "; ".join(all_warns)
-            self.lbl_vid_warn.setStyleSheet("color: #e67e22; font-size: 12px;")
+            full = "; ".join(all_warns)
+            self.lbl_vid_warn.setStyleSheet("color: #e74c3c; font-size: 14px; font-weight: bold;")
             self.lbl_vid_warn.setToolTip(full)
-            fm = self.lbl_vid_warn.fontMetrics()
-            elided = fm.elidedText(full, Qt.ElideRight, self.lbl_vid_warn.maximumWidth())
-            self.lbl_vid_warn.setText(elided)
+            self.lbl_vid_warn.setText("✗")
             return False, internals, crosses
         else:
             n = len(segs)
             ok_text = "✓" if n > 0 else ""
-            self.lbl_vid_warn.setStyleSheet("color: #27ae60; font-size: 12px;")
+            self.lbl_vid_warn.setStyleSheet("color: #27ae60; font-size: 14px; font-weight: bold;")
             self.lbl_vid_warn.setText(ok_text)
             self.lbl_vid_warn.setToolTip("")
             return True, [], []
@@ -2209,16 +2476,21 @@ class WorkbenchPage(QWidget):
         return self.ed_episode.value()
 
     def _save_tab_actors(self, actor_sel: ActorSelector):
-        """演员变动时自动同步到项目"""
+        """演员绑定时自动同步到项目并推送到其他 Tab（仅选择不变更绑定）"""
         if not self.project:
             return
-        all_ids = set()
+        ids = list(actor_sel.project_actor_ids)
+        # 仅在绑定的演员列表真正变化时才持久化
+        if set(ids) == set(self.project.actor_ids):
+            return
+        self.project.set_actor_ids(ids)
+        self.manager.save(self.project)
+        # 同步到其他 Tab
         for i in range(self.tabs.count()):
             sel = self.tabs.widget(i).findChild(ActorSelector)
-            if sel:
-                all_ids.update(sel.project_actor_ids)
-        self.project.set_actor_ids(list(all_ids))
-        self.manager.save(self.project)
+            if sel and sel is not actor_sel:
+                sel.set_project_actor_ids(ids)
+                sel._refresh_completer()
 
     def _update_preview(self):
         if not hasattr(self, 'lbl_preview'):
@@ -2355,11 +2627,6 @@ class WorkbenchPage(QWidget):
         if ep is not None:
             temp_proj._data["episode"] = ep
 
-        self.btn_run.setEnabled(False)
-        self.txt_log.clear()
-
-        engine = FFmpegEngine(log_callback=self.log)
-
         if idx == 0:
             kwargs = {
                 "proj": temp_proj,
@@ -2372,31 +2639,27 @@ class WorkbenchPage(QWidget):
                 "contrast": self.spin_contrast.value() if self.chk_contrast.isChecked() else 1,
                 "speed": self.spin_speed.value() if self.chk_speed.isChecked() else 1,
             }
-            self.worker = Worker(engine, "gif", **kwargs)
+            self._launch_ffmpeg_task("GIF", "gif", **kwargs)
 
         elif idx == 1:
             segs = self._get_segments()
             if not segs:
                 QMessageBox.warning(self, "提示", "请至少输入一段")
-                self.btn_run.setEnabled(True)
                 return
             # 时序校验
             ok, internals, crosses = self._validate_segments()
             if internals:
                 QMessageBox.warning(self, "时间错误",
                     "起始时间 ≥ 结束时间：\n" + "\n".join(internals))
-                self.btn_run.setEnabled(True)
                 return
             if crosses:
                 reply = QMessageBox.question(self, "时间段重叠",
                     "时间段重叠：\n" + "\n".join(crosses) + "\n\n仍然执行？",
                     QMessageBox.Yes | QMessageBox.No)
                 if reply != QMessageBox.Yes:
-                    self.btn_run.setEnabled(True)
                     return
 
             if len(segs) == 1:
-                # 单段直接剪辑
                 kwargs = {
                     "proj": temp_proj,
                     "start": segs[0][0],
@@ -2406,9 +2669,8 @@ class WorkbenchPage(QWidget):
                     "aspect": self.cb_aspect.currentText() if self.chk_aspect.isChecked() else None,
                     "audio_stream": self.spin_audio_idx.value() if self.chk_audio_idx.isChecked() else None,
                 }
-                self.worker = Worker(engine, "cut", **kwargs)
+                self._launch_ffmpeg_task("视频", "cut", **kwargs)
             else:
-                # 多段拼接
                 kwargs = {
                     "proj": temp_proj,
                     "segments": segs,
@@ -2417,19 +2679,25 @@ class WorkbenchPage(QWidget):
                     "aspect": self.cb_aspect.currentText() if self.chk_aspect.isChecked() else None,
                     "audio_stream": self.spin_audio_idx.value() if self.chk_audio_idx.isChecked() else None,
                 }
-                self.worker = Worker(engine, "concat", **kwargs)
+                self._launch_ffmpeg_task("拼接", "concat", **kwargs)
 
-        self.worker.log_signal.connect(self.log)
-        self.worker.done_signal.connect(self._on_done)
-        self.worker.start()
+    def _launch_ffmpeg_task(self, tag: str, mode: str, **kwargs):
+        """启动后台 FFmpeg 任务，支持多任务并行"""
+        self.log(f"── {tag} 开始 ──")
+        engine = FFmpegEngine()
+        worker = Worker(engine, mode, **kwargs)
+        worker.log_signal.connect(lambda msg, t=tag: self.log(f"[{t}] {msg}"))
+        worker.done_signal.connect(lambda ok, path, t=tag: self._on_task_done(t, ok, path))
+        worker.start()
+        # 保持引用防止被 GC，清理已完成的任务
+        self._workers.append(worker)
+        self._workers = [w for w in self._workers if w.isRunning()]
 
-    def _on_done(self, ok: bool, path: str):
-        self.btn_run.setEnabled(True)
+    def _on_task_done(self, tag: str, ok: bool, path: str):
         if ok and path:
-            self.log(f"[OK] 输出: {path}")
-            QMessageBox.information(self, "完成", f"已生成:\n{path}")
+            self.log(f"[{tag}] ✓ {Path(path).name}")
         else:
-            self.log("[ERR] 执行失败，请检查日志")
+            self.log(f"[{tag}] ✗ 失败")
 
     def _open_target_dir(self):
         import subprocess
@@ -2479,6 +2747,8 @@ class MainWindow(QMainWindow):
 
         self.list_page.project_selected.connect(self._enter_workbench)
         self.workbench.back_signal.connect(self._back_to_list)
+        self.list_page.theme_toggled.connect(self._toggle_theme)
+        self.workbench.theme_toggled.connect(self._toggle_theme)
 
         self.stack.addWidget(self.list_page)
         self.stack.addWidget(self.workbench)
@@ -2486,15 +2756,107 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.stack)
         self.stack.setCurrentIndex(0)
 
+        # 加载偏好配置
+        import json
+        self._config_path = Path(__file__).parent / ".filmcutter_config.json"
+        config = {}
+        if self._config_path.exists():
+            try:
+                config = json.loads(self._config_path.read_text(encoding='utf-8'))
+            except Exception:
+                pass
+
+        # 自动根据时间选择日间/夜间模式（18:00 ~ 05:59 为夜间），用户偏好优先
+        from datetime import datetime
+        hour = datetime.now().hour
+        if "dark" in config:
+            self._dark = config["dark"]
+        else:
+            self._dark = (hour >= 18 or hour < 6)
+        self._light_palette = None  # 延迟到首次切换前保存（确保 Fusion 已生效）
+        if self._dark:
+            self._light_palette = QPalette(QApplication.instance().palette())
+            QApplication.instance().setPalette(self._dark_palette())
+            self.list_page.btn_theme_list.setText("☀")
+            wb_btn = self.workbench.findChild(QPushButton, "btn_theme_wb")
+            if wb_btn:
+                wb_btn.setText("☀")
+            self._set_title_bar(True)
+
+    def _set_title_bar(self, dark: bool):
+        """Windows 标题栏暗色模式"""
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = int(self.winId())
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    ctypes.byref(ctypes.c_int(1 if dark else 0)),
+                    ctypes.sizeof(ctypes.c_int))
+            except Exception:
+                pass
+
     def _enter_workbench(self, project: Project):
         self.workbench.load_project(project)
         self.stack.setCurrentIndex(1)
         self.showMaximized()
 
     def _back_to_list(self):
+        self.workbench._save_state()
         self.list_page._refresh_list()
         self.stack.setCurrentIndex(0)
         self.showNormal()
+
+    def closeEvent(self, event):
+        self.workbench._save_state()
+        event.accept()
+
+    @staticmethod
+    def _dark_palette():
+        p = QPalette()
+        p.setColor(QPalette.Window, QColor(45, 45, 45))
+        p.setColor(QPalette.WindowText, QColor(220, 220, 220))
+        p.setColor(QPalette.Base, QColor(35, 35, 35))
+        p.setColor(QPalette.AlternateBase, QColor(45, 45, 45))
+        p.setColor(QPalette.ToolTipBase, QColor(45, 45, 45))
+        p.setColor(QPalette.ToolTipText, QColor(220, 220, 220))
+        p.setColor(QPalette.Text, QColor(220, 220, 220))
+        p.setColor(QPalette.Button, QColor(53, 53, 53))
+        p.setColor(QPalette.ButtonText, QColor(220, 220, 220))
+        p.setColor(QPalette.BrightText, QColor(255, 80, 80))
+        p.setColor(QPalette.Link, QColor(42, 130, 218))
+        p.setColor(QPalette.Highlight, QColor(42, 130, 218))
+        p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+        p.setColor(QPalette.Disabled, QPalette.Text, QColor(127, 127, 127))
+        p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127))
+        return p
+
+    def _toggle_theme(self):
+        self._dark = not self._dark
+        app = QApplication.instance()
+        if self._dark:
+            if self._light_palette is None:
+                self._light_palette = QPalette(app.palette())
+            app.setPalette(self._dark_palette())
+        else:
+            app.setPalette(self._light_palette)
+        # 强制刷新所有 widget
+        app.setStyleSheet("/* */")
+        app.setStyleSheet("")
+        # 更新按钮图标：夜间显示☀，日间显示🌙
+        icon = "☀" if self._dark else "🌙"
+        self.list_page.btn_theme_list.setText(icon)
+        wb_btn = self.workbench.findChild(QPushButton, "btn_theme_wb")
+        if wb_btn:
+            wb_btn.setText(icon)
+        self._set_title_bar(self._dark)
+        # 持久化偏好
+        import json
+        try:
+            self._config_path.write_text(json.dumps({"dark": self._dark}), encoding='utf-8')
+        except Exception:
+            pass
 
 
 

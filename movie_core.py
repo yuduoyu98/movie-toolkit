@@ -288,9 +288,15 @@ class ProjectManager:
                 is_series INTEGER NOT NULL DEFAULT 0,
                 season INTEGER,
                 source_file_path TEXT NOT NULL,
-                target_base_path TEXT NOT NULL
+                target_base_path TEXT NOT NULL,
+                state TEXT DEFAULT ''
             )
         """)
+        # 兼容旧表：无 state 列则添加
+        try:
+            cursor.execute("ALTER TABLE projects ADD COLUMN state TEXT DEFAULT ''")
+        except Exception:
+            pass
 
         # 项目-演员关联表
         cursor.execute("""
@@ -342,22 +348,24 @@ class ProjectManager:
         if project.id:
             cursor.execute(
                 """UPDATE projects SET slug=?, movie=?, year=?, is_series=?,
-                   season=?, source_file_path=?, target_base_path=?
+                   season=?, source_file_path=?, target_base_path=?, state=?
                    WHERE id=?""",
                 (project.slug, project.movie, project.year,
                  1 if project.is_series else 0, project.season,
                  project.source_file_path, project.target_base_path,
+                 project._data.get("state", ""),
                  project.id)
             )
         else:
             cursor.execute(
                 """INSERT INTO projects
                    (slug, movie, year, is_series, season, source_file_path,
-                    target_base_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    target_base_path, state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (project.slug, project.movie, project.year,
                  1 if project.is_series else 0, project.season,
-                 project.source_file_path, project.target_base_path)
+                 project.source_file_path, project.target_base_path,
+                 project._data.get("state", ""))
             )
             project._data["id"] = cursor.lastrowid
 
@@ -377,9 +385,22 @@ class ProjectManager:
         cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         self.conn.commit()
 
+    def save_state(self, project_id: int, state_json: str):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE projects SET state=? WHERE id=?", (state_json, project_id))
+        self.conn.commit()
+
+    def load_state(self, project_id: int) -> str:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT state FROM projects WHERE id=?", (project_id,))
+        row = cursor.fetchone()
+        return row["state"] if row else ""
+
 class NamingEngine:
     @staticmethod
     def _safe_name(name: str) -> str:
+        # 英文冒号替换为中文冒号，同时去除两侧空格（避免出现 .：. 这样的怪异连接）
+        name = re.sub(r'\s*:\s*', '：', name)
         return name.replace(' ', '.')
 
     @staticmethod
