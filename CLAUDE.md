@@ -93,7 +93,7 @@ ffmpeg -y -f concat -i "tmp/concat/filelist.txt" -c copy "{output}"
 - **Project list** — Search box, bold `[Year]Name` format, per-row edit/delete, small-window startup → maximize on enter.
 - **Actor sync** — `_save_tab_actors` uses triggering tab as truth (not union). `set_project_actor_ids` syncs `project_actor_ids` + `selected_actor_ids` + completer. Selection ≠ unbinding.
 - **Image rename** — Regex `^\[[A-Z]{2,4}\]` detects already-renamed files. Status column: green new name / orange "未重命名" / gray "已重命名". Search auto-selects matching non-renamed files. Sort by time/name with ↑↓ toggle. jpg/png filter checkboxes. "隐藏已重命名的图片" default on.
-- **State persistence** — Workbench parameters (segments, GIF options, actors, tab) saved per-project to `state_{slug}.json`.
+- **State persistence** — Workbench parameters (segments, GIF options, actors, tab) saved to `projects.state` TEXT column (JSON). `ProjectManager.save_state` / `load_state`.
 - **Video segments** — Copy selected rows in import format (`start,end` per line). Error shown as red ✗ with tooltip.
 - **`_safe_name`** — Replaces `:` with `：` (Chinese colon), strips surrounding spaces first.
 

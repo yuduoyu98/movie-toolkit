@@ -64,6 +64,7 @@ python run.py
 | season | INTEGER | | 季数（剧集时使用） |
 | source_file_path | TEXT | NOT NULL | 源视频文件路径 |
 | target_base_path | TEXT | NOT NULL | 输出目录路径 |
+| state | TEXT | DEFAULT '' | 工作台状态（JSON）：参数、时段、演员选择等 |
 
 ### project_actors（项目-演员关联表）
 
