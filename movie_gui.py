@@ -438,11 +438,12 @@ class ActorSelector(QWidget):
 
     actors_changed = pyqtSignal()
 
-    def __init__(self, actor_manager: ActorManager, parent=None):
+    def __init__(self, actor_manager: ActorManager, parent=None, copy_list_button: bool = False):
         super().__init__(parent)
         self.actor_manager = actor_manager
         self.selected_actor_ids: List[int] = []
         self.project_actor_ids: List[int] = []
+        self._copy_list_button = copy_list_button
         self._build_ui()
 
     def set_project_actor_ids(self, ids: List[int]):
@@ -452,6 +453,25 @@ class ActorSelector(QWidget):
         self.selected_actor_ids = [a for a in self.selected_actor_ids if a in self.project_actor_ids]
         self._refresh_completer()
         self._refresh_tags()
+
+    def _copy_actor_list(self):
+        """复制项目绑定演员名称到剪贴板。
+
+        规则：有中文译名用译名，否则英文名；名字内空格替换为 .；演员间用空格连接。
+        """
+        parts = []
+        for aid in self.project_actor_ids:
+            actor = self.actor_manager.get(aid)
+            if not actor:
+                continue
+            name = (actor.chn_name or actor.name).replace(" ", ".")
+            parts.append(name)
+        text = " ".join(parts)
+        QApplication.clipboard().setText(text)
+        btn = getattr(self, "btn_copy_list", None)
+        if btn is not None:
+            btn.setText("✓ 已复制" if text else "（无绑定演员）")
+            QTimer.singleShot(1200, lambda: btn.setText("复制演员列表"))
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -491,6 +511,16 @@ class ActorSelector(QWidget):
         self.tags_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.tags_layout = FlowLayout(self.tags_widget, margin=2, spacing=4)
         layout.addWidget(self.tags_widget)
+
+        # 底部：复制演员列表（仅工作台启用）
+        if self._copy_list_button:
+            self.btn_copy_list = QPushButton("复制演员列表")
+            self.btn_copy_list.setToolTip(
+                "复制项目绑定演员的名称：有中文译名用译名，否则英文名；"
+                "名字内空格用 . 连接；演员间用空格分隔"
+            )
+            self.btn_copy_list.clicked.connect(self._copy_actor_list)
+            layout.addWidget(self.btn_copy_list)
 
 
 
@@ -1493,7 +1523,7 @@ class WorkbenchPage(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        actor_sel = ActorSelector(self.actor_manager)
+        actor_sel = ActorSelector(self.actor_manager, copy_list_button=True)
         actor_sel.actors_changed.connect(self._update_preview)
         actor_sel.actors_changed.connect(lambda s=actor_sel: self._save_tab_actors(s))
         right_layout.addWidget(actor_sel)
@@ -1600,7 +1630,7 @@ class WorkbenchPage(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        actor_sel = ActorSelector(self.actor_manager)
+        actor_sel = ActorSelector(self.actor_manager, copy_list_button=True)
         actor_sel.actors_changed.connect(self._update_preview)
         actor_sel.actors_changed.connect(lambda s=actor_sel: self._save_tab_actors(s))
         right_layout.addWidget(actor_sel)
@@ -1717,7 +1747,7 @@ class WorkbenchPage(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        actor_sel = ActorSelector(self.actor_manager)
+        actor_sel = ActorSelector(self.actor_manager, copy_list_button=True)
         actor_sel.actors_changed.connect(self._on_rename_actor_changed)
         actor_sel.actors_changed.connect(lambda s=actor_sel: self._save_tab_actors(s))
         right_layout.addWidget(actor_sel)
