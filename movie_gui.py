@@ -554,7 +554,10 @@ class ActorSelector(QWidget):
             actor = dlg.get_actor()
             self.actor_manager.add(actor)
             self._refresh_completer()
-            self.selected_actor_ids.append(actor.id)
+            if actor.id not in self.selected_actor_ids:
+                self.selected_actor_ids.append(actor.id)
+            if actor.id not in self.project_actor_ids:
+                self.project_actor_ids.append(actor.id)
             self._refresh_tags()
             self.actors_changed.emit()
 
