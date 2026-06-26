@@ -62,7 +62,7 @@ QPalette = QtGui.QPalette
 QColor = QtGui.QColor
 from movie_core import (
     Actor, ActorManager, Project, ProjectManager,
-    NamingEngine, FFmpegEngine, PathHelper
+    NamingEngine, FFmpegEngine, PathHelper, app_data_dir, resource_path
 )
 
 
@@ -2734,7 +2734,7 @@ class MainWindow(QMainWindow):
         self.move((screen.width() - 480) // 2, (screen.height() - 420) // 2)
 
         # 设置窗口图标
-        icon_path = Path(__file__).parent / "icon.svg"
+        icon_path = resource_path("icon.svg")
         if icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
 
@@ -2758,7 +2758,7 @@ class MainWindow(QMainWindow):
 
         # 加载偏好配置
         import json
-        self._config_path = Path(__file__).parent / ".filmcutter_config.json"
+        self._config_path = app_data_dir() / ".filmcutter_config.json"
         config = {}
         if self._config_path.exists():
             try:

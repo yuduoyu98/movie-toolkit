@@ -2,12 +2,36 @@
 Movie Toolkit Core
 项目制 + 演员库：项目ID只用影视名，创建时可无演员，剪辑时强制要求演员
 """
+import os
 import re
 import subprocess
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
+
+
+def app_data_dir() -> Path:
+    """可写的应用数据目录。
+
+    打包后写到 %LOCALAPPDATA%\\FilmCutter —— 独立于 exe 所在的 dist 目录，
+    重新打包/覆盖 dist 不会影响数据；源码运行时用脚本所在目录，行为与原先一致。
+    """
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        d = Path(base) / "FilmCutter"
+    else:
+        d = Path(__file__).resolve().parent
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def resource_path(name: str) -> Path:
+    """只读资源（如 icon.svg）路径：打包后从 sys._MEIPASS 取，源码运行取脚本目录。"""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / name
+    return Path(__file__).resolve().parent / name
 
 
 class Actor:
@@ -54,8 +78,8 @@ class Actor:
 class ActorManager:
     """演员库管理，使用 SQLite 存储"""
 
-    def __init__(self, db_path: str = "data.db"):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = Path(db_path) if db_path else app_data_dir() / "data.db"
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -260,8 +284,8 @@ class Project:
 
 
 class ProjectManager:
-    def __init__(self, db_path: str = "data.db", actor_manager: Optional[ActorManager] = None):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: Optional[str] = None, actor_manager: Optional[ActorManager] = None):
+        self.db_path = Path(db_path) if db_path else app_data_dir() / "data.db"
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -555,7 +579,7 @@ class FFmpegEngine:
     def concat_segments(self, proj: Project, segments: List[Tuple[str, str]],
                         copy: bool = False, no_audio: bool = False,
                         aspect: Optional[str] = None, audio_stream: Optional[int] = None) -> Tuple[bool, Path]:
-        tmp_dir = Path("tmp/concat")
+        tmp_dir = app_data_dir() / "tmp" / "concat"
         PathHelper.ensure_dir(tmp_dir)
         for f in tmp_dir.glob("*.mp4"):
             f.unlink()
