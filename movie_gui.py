@@ -1213,6 +1213,89 @@ class ThumbExtractor(QThread):
         self.done.emit()
 
 
+def _sheet_grid(dur):
+    """按时长分级返回 contact-sheet 配置 (帧数, 列, 行)；帧数 0 表示太短，用单帧。"""
+    if dur < 10:
+        return (0, 0, 0)
+    if dur < 60:
+        return (4, 2, 2)
+    if dur < 300:
+        return (6, 3, 2)
+    return (9, 3, 3)
+
+
+class _ZoomImage(QtWidgets.QScrollArea):
+    """可缩放图片视图：默认适配视口，Ctrl+滚轮缩放，放大后可滚动。GIF 用 setMovie（原始大小）。"""
+    def __init__(self):
+        super().__init__()
+        self.img = QLabel()
+        self.img.setAlignment(Qt.AlignCenter)
+        self.img.setMinimumSize(1, 1)
+        self._pix = None
+        self._zoom = 1.0
+        self.setWidget(self.img)
+        self.setWidgetResizable(False)
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(420, 280)
+
+    def setFullPixmap(self, pix):
+        self._pix = pix
+        self._zoom = 1.0
+        self.img.setMovie(None)
+        self._render()
+
+    def setMovie(self, movie):
+        self._pix = None
+        self._zoom = 1.0
+        self.img.setMovie(movie)
+        if movie is not None:
+            self.img.adjustSize()
+            self.img.resize(self.img.sizeHint())
+
+    def clearImage(self):
+        self._pix = None
+        self._zoom = 1.0
+        self.img.setMovie(None)
+        self.img.clear()
+
+    def setText(self, t):
+        self._pix = None
+        self.img.setMovie(None)
+        self.img.setText(t)
+        self.img.resize(self.viewport().size())
+
+    def _render(self):
+        if self._pix is None or self._pix.isNull():
+            return
+        vw = max(1, self.viewport().width() - 6)
+        vh = max(1, self.viewport().height() - 6)
+        fit = self._pix.scaled(vw, vh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if abs(self._zoom - 1.0) < 1e-6:
+            scaled = fit
+        else:
+            scaled = self._pix.scaled(max(1, int(fit.width() * self._zoom)),
+                                      max(1, int(fit.height() * self._zoom)),
+                                      Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.img.resize(scaled.size())
+        self.img.setPixmap(scaled)
+
+    def wheelEvent(self, e):
+        if self._pix is not None and (e.modifiers() & Qt.ControlModifier):
+            factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+            self._zoom = max(0.1, min(12.0, self._zoom * factor))
+            self._render()
+            e.accept()
+        else:
+            super().wheelEvent(e)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._pix is not None:
+            self._render()
+        elif self.img.text() and self.img.movie() is None:
+            self.img.resize(self.viewport().size())
+
+
 class _PreviewFrameExtractor(QThread):
     """后台为预览抽取多帧（contact sheet 素材）；Qt 拼接在主线程完成"""
     done = pyqtSignal(int)
@@ -1486,11 +1569,8 @@ class TaskListDialog(QDialog):
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # GIF 用 QMovie 动图；视频显示抽帧缩略图，可用系统播放器打开完整视频
-        lbl_img = QLabel()
-        lbl_img.setAlignment(Qt.AlignCenter)
-        lbl_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        lbl_img.setMinimumSize(440, 300)
+        # GIF 用 QMovie 动图；视频显示抽帧拼图（_ZoomImage 自适应窗口 + Ctrl+滚轮缩放）
+        lbl_img = _ZoomImage()
         layout.addWidget(lbl_img, stretch=1)
 
         movie = {"obj": None}
@@ -1549,7 +1629,7 @@ class TaskListDialog(QDialog):
             info_lbl.setText(f"{tinfo.get('tag', '')} · {Path(out).name if out else ''}")
             dlg.setWindowTitle(f"任务预览 ({p + 1}/{n})")
             lbl_img.setMovie(None)
-            lbl_img.clear()
+            lbl_img.clearImage()
             if is_gif:
                 m = QtGui.QMovie(out)
                 if m.isValid():
@@ -1560,21 +1640,28 @@ class TaskListDialog(QDialog):
                     lbl_img.setText("(无法加载动图)")
                 btn_open.setVisible(False)
             else:
-                # 视频：多帧拼图（contact sheet）+ 播放按钮
+                # 视频：按时长分级（单帧 / 多帧拼图）+ 播放按钮
                 btn_open.setVisible(True)
-                sheet = self._sheet_path(tid)
-                pix = QtGui.QPixmap(str(sheet)) if sheet.exists() else QtGui.QPixmap()
-                if not pix.isNull():
-                    screen = QApplication.primaryScreen().availableGeometry()
-                    lbl_img.setPixmap(pix.scaled(int(screen.width() * 0.7), int(screen.height() * 0.65),
-                                                 Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                dur = ThumbExtractor._probe_duration(out)
+                n_frames, cols, rows = _sheet_grid(dur)
+                if n_frames > 0:
+                    sheet = self._sheet_path(tid)
+                    pix = QtGui.QPixmap(str(sheet)) if sheet.exists() else QtGui.QPixmap()
                 else:
-                    # 未缓存：先提示，后台抽帧，完成后主线程拼接并展示
+                    # 太短：用单帧（中间帧）
+                    tp = self._thumb_path(tid)
+                    if not tp.exists():
+                        self._extract_thumb_sync(tid, out)
+                    pix = QtGui.QPixmap(str(tp)) if tp.exists() else QtGui.QPixmap()
+                if not pix.isNull():
+                    lbl_img.setFullPixmap(pix)
+                elif n_frames > 0:
+                    # 拼图未缓存：后台抽帧，完成后主线程拼接并展示
                     lbl_img.setText("正在生成预览拼图…")
-                    worker = _PreviewFrameExtractor(tid, out)
+                    worker = _PreviewFrameExtractor(tid, out, n_frames)
 
-                    def on_done(done_tid, _state=state, _lbl=lbl_img, _w=worker):
-                        self._finalize_contact_sheet(done_tid)
+                    def on_done(done_tid, _state=state, _lbl=lbl_img, _w=worker, _c=cols, _r=rows):
+                        self._finalize_contact_sheet(done_tid, _c, _r)
                         try:
                             self._sheet_workers.remove(_w)
                         except Exception:
@@ -1586,13 +1673,13 @@ class TaskListDialog(QDialog):
                         if p2.isNull():
                             _lbl.setText("(无缩略图)")
                         else:
-                            screen = QApplication.primaryScreen().availableGeometry()
-                            _lbl.setPixmap(p2.scaled(int(screen.width() * 0.7), int(screen.height() * 0.65),
-                                                     Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                            _lbl.setFullPixmap(p2)
 
                     worker.done.connect(on_done)
                     self._sheet_workers.append(worker)
                     worker.start()
+                else:
+                    lbl_img.setText("(无缩略图)")
             btn_prev.setEnabled(p > 0)
             btn_next.setEnabled(p < n - 1)
 
