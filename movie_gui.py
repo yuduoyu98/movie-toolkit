@@ -2122,6 +2122,9 @@ class WorkbenchPage(QWidget):
         btn_next.setFocusPolicy(Qt.NoFocus)
         ctrl.addWidget(btn_prev)
         ctrl.addWidget(btn_next)
+        hint_lbl = QLabel("Del 删除·至回收站")
+        hint_lbl.setStyleSheet("color: #bdc3c7;")
+        ctrl.addWidget(hint_lbl)
         layout.addLayout(ctrl)
         # 对话框自己吃方向键
         dlg.setFocusPolicy(Qt.StrongFocus)
@@ -2129,6 +2132,9 @@ class WorkbenchPage(QWidget):
 
         def load_image(p):
             """加载过滤列表中第 p 张图片"""
+            total = len(self._rename_filtered)
+            if p < 0 or p >= total:
+                return
             state["pos"] = p
             idx = self._rename_filtered[p]
             fpath = self._rename_items[idx]["path"]
@@ -2144,10 +2150,12 @@ class WorkbenchPage(QWidget):
                     pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 lbl_img.setPixmap(pix)
                 dlg.setWindowTitle(f"图片预览 ({p + 1}/{total})")
+                chk.setEnabled(True)
                 chk.blockSignals(True)
                 chk.setChecked(self._rename_items[idx]["checked"])
                 chk.blockSignals(False)
                 ritem = self._rename_items[idx]
+                info_lbl.setStyleSheet("color: #7f8c8d;")
                 info_lbl.setText(
                     f"{ritem['path'].name}  |  "
                     f"{ritem['size'] / 1024:.1f} KB  |  "
@@ -2163,11 +2171,45 @@ class WorkbenchPage(QWidget):
                 load_image(state["pos"] - 1)
 
         def go_next():
+            total = len(self._rename_filtered)
             if state["pos"] < total - 1:
                 load_image(state["pos"] + 1)
 
         btn_prev.clicked.connect(go_prev)
         btn_next.clicked.connect(go_next)
+
+        # 删除当前图片（移至回收站），不弹确认框
+        def delete_current():
+            cur = self._rename_filtered
+            if not cur:
+                return
+            p = state["pos"]
+            if p < 0 or p >= len(cur):
+                return
+            idx = cur[p]
+            fpath = self._rename_items[idx]["path"]
+            if not self._delete_rename_image(idx):
+                info_lbl.setStyleSheet("color: #e74c3c;")
+                info_lbl.setText(f"删除失败：{fpath.name}")
+                return
+            new_total = len(self._rename_filtered)
+            if new_total == 0:
+                # 无图片：保留对话框，显示提示，不关闭
+                lbl_img.clear()
+                lbl_img.setText("（无图片）")
+                chk.blockSignals(True)
+                chk.setChecked(False)
+                chk.blockSignals(False)
+                chk.setEnabled(False)
+                btn_prev.setEnabled(False)
+                btn_next.setEnabled(False)
+                dlg.setWindowTitle("图片预览 (0/0)")
+                info_lbl.setStyleSheet("color: #7f8c8d;")
+                info_lbl.setText("")
+                return
+            if p >= new_total:
+                p = new_total - 1
+            load_image(p)
 
         # 键盘事件
         def key_handler(event):
@@ -2175,6 +2217,8 @@ class WorkbenchPage(QWidget):
                 go_prev()
             elif event.key() == Qt.Key_Right:
                 go_next()
+            elif event.key() == Qt.Key_Delete:
+                delete_current()
             elif event.key() == Qt.Key_Escape:
                 dlg.close()
             elif event.key() == Qt.Key_Space:
@@ -2186,6 +2230,21 @@ class WorkbenchPage(QWidget):
 
         load_image(pos)
         dlg.exec_()
+
+    def _delete_rename_image(self, idx: int) -> bool:
+        """将 _rename_items 中第 idx 张图片移至回收站，并从列表移除；成功返回 True。"""
+        if idx < 0 or idx >= len(self._rename_items):
+            return False
+        fpath = self._rename_items[idx]["path"]
+        # PyQt5 的 moveToTrash 返回 (ok, 回收站内路径) 元组，取首位判断成功
+        result = QtCore.QFile.moveToTrash(str(fpath))
+        ok = result[0] if isinstance(result, tuple) else result
+        if not ok:
+            return False
+        del self._rename_items[idx]
+        self._populate_rename_views()
+        self._update_preview()
+        return True
 
 
     def _on_rename_check_toggled(self, file_path: str, checked: bool):
@@ -2226,7 +2285,7 @@ class WorkbenchPage(QWidget):
         self._update_preview()
 
     def _on_rename_context_menu(self, pos):
-        """右键菜单：复制文件名"""
+        """右键菜单：复制文件名 / 删除"""
         row = self.detail_table.rowAt(pos.y())
         if row < 0 or row >= len(self._rename_filtered):
             return
@@ -2241,6 +2300,8 @@ class WorkbenchPage(QWidget):
         if not new_name:
             act_copy_new.setEnabled(False)
         act_copy_path = menu.addAction("复制完整路径")
+        menu.addSeparator()
+        act_del = menu.addAction("删除（至回收站）")
 
         action = menu.exec_(self.detail_table.mapToGlobal(pos))
         if action == act_copy_cur:
@@ -2249,6 +2310,9 @@ class WorkbenchPage(QWidget):
             QApplication.clipboard().setText(new_name)
         elif action == act_copy_path:
             QApplication.clipboard().setText(str(fpath))
+        elif action == act_del:
+            if not self._delete_rename_image(idx):
+                QMessageBox.warning(self, "删除失败", f"无法将文件移至回收站：\n{fpath.name}")
 
     def _pick_rename_dir(self):
         """浏览选择目录"""
