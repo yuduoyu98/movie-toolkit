@@ -425,7 +425,10 @@ class NamingEngine:
     def _safe_name(name: str) -> str:
         # 英文冒号替换为中文冒号，同时去除两侧空格（避免出现 .：. 这样的怪异连接）
         name = re.sub(r'\s*:\s*', '：', name)
-        return name.replace(' ', '.')
+        # 仅当空格两侧都是"字"（字母/数字/中文等）时才把空格变成 "."；
+        # 紧邻标点的空格（逗号、感叹号等的前后）直接去掉，避免出现 ",." / ".,"
+        name = re.sub(r'(?<=\w)\s+(?=\w)', '.', name)
+        return name.replace(' ', '')
 
     @staticmethod
     def _build_actor_str(display_names: List[str]) -> str:
