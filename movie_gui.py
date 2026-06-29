@@ -1225,41 +1225,52 @@ def _sheet_grid(dur):
 
 
 class _ZoomImage(QtWidgets.QScrollArea):
-    """可缩放图片视图：默认适配视口，Ctrl+滚轮缩放，放大后可滚动。GIF 用 setMovie（原始大小）。"""
+    """可缩放图片视图：默认适配视口，Ctrl+滚轮缩放，放大后可滚动。GIF/图片都自适应。"""
     def __init__(self):
         super().__init__()
         self.img = QLabel()
         self.img.setAlignment(Qt.AlignCenter)
         self.img.setMinimumSize(1, 1)
         self._pix = None
+        self._movie = None
+        self._native = None   # GIF 原始尺寸
         self._zoom = 1.0
         self.setWidget(self.img)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(420, 280)
 
+    def _viewport_size(self):
+        return max(1, self.viewport().width() - 6), max(1, self.viewport().height() - 6)
+
     def setFullPixmap(self, pix):
+        self._movie = None
+        self._native = None
         self._pix = pix
         self._zoom = 1.0
         self.img.setMovie(None)
         self._render()
 
-    def setMovie(self, movie):
+    def setMovie(self, movie, native_size=None):
         self._pix = None
+        self._movie = movie
+        self._native = native_size
         self._zoom = 1.0
         self.img.setMovie(movie)
         if movie is not None:
-            self.img.adjustSize()
-            self.img.resize(self.img.sizeHint())
+            self._fit_movie()
 
     def clearImage(self):
         self._pix = None
+        self._movie = None
+        self._native = None
         self._zoom = 1.0
         self.img.setMovie(None)
         self.img.clear()
 
     def setText(self, t):
         self._pix = None
+        self._movie = None
         self.img.setMovie(None)
         self.img.setText(t)
         self.img.resize(self.viewport().size())
@@ -1267,8 +1278,7 @@ class _ZoomImage(QtWidgets.QScrollArea):
     def _render(self):
         if self._pix is None or self._pix.isNull():
             return
-        vw = max(1, self.viewport().width() - 6)
-        vh = max(1, self.viewport().height() - 6)
+        vw, vh = self._viewport_size()
         fit = self._pix.scaled(vw, vh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if abs(self._zoom - 1.0) < 1e-6:
             scaled = fit
@@ -1279,11 +1289,31 @@ class _ZoomImage(QtWidgets.QScrollArea):
         self.img.resize(scaled.size())
         self.img.setPixmap(scaled)
 
+    def _fit_movie(self):
+        if self._movie is None:
+            return
+        nw = nh = 0
+        if self._native is not None:
+            nw, nh = self._native.width(), self._native.height()
+        if nw <= 0 or nh <= 0:
+            cur = self._movie.currentImage()
+            nw, nh = cur.width(), cur.height()
+        if nw <= 0 or nh <= 0:
+            return
+        vw, vh = self._viewport_size()
+        scale = min(vw / nw, vh / nh) * self._zoom
+        sw, sh = max(1, int(nw * scale)), max(1, int(nh * scale))
+        self._movie.setScaledSize(QtCore.QSize(sw, sh))
+        self.img.resize(QtCore.QSize(sw, sh))
+
     def wheelEvent(self, e):
-        if self._pix is not None and (e.modifiers() & Qt.ControlModifier):
+        if (self._pix is not None or self._movie is not None) and (e.modifiers() & Qt.ControlModifier):
             factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
             self._zoom = max(0.1, min(12.0, self._zoom * factor))
-            self._render()
+            if self._pix is not None:
+                self._render()
+            else:
+                self._fit_movie()
             e.accept()
         else:
             super().wheelEvent(e)
@@ -1292,6 +1322,8 @@ class _ZoomImage(QtWidgets.QScrollArea):
         super().resizeEvent(e)
         if self._pix is not None:
             self._render()
+        elif self._movie is not None:
+            self._fit_movie()
         elif self.img.text() and self.img.movie() is None:
             self.img.resize(self.viewport().size())
 
@@ -1634,10 +1666,12 @@ class TaskListDialog(QDialog):
             if is_gif:
                 m = QtGui.QMovie(out)
                 if m.isValid():
-                    lbl_img.setMovie(m)
+                    native = QtGui.QPixmap(out).size() if out else None
+                    lbl_img.setMovie(m, native)
                     m.start()
                     movie["obj"] = m
                 else:
+                    lbl_img.setMovie(None)
                     lbl_img.setText("(无法加载动图)")
                 btn_open.setVisible(False)
             else:
