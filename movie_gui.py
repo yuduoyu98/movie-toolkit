@@ -1566,6 +1566,7 @@ class TaskListDialog(QDialog):
         dlg = QDialog(self)
         dlg.setWindowTitle("任务预览")
         dlg.setMinimumSize(560, 440)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(8, 8, 8, 8)
 
