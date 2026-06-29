@@ -1551,7 +1551,30 @@ class WorkbenchPage(QWidget):
         self.table_segments = QTableWidget(0, 2)
         self.table_segments.setHorizontalHeaderLabels(["起始时间", "结束时间"])
         self.table_segments.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_segments.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table_segments.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table_segments.itemChanged.connect(self._update_preview)
+        self._segment_undo_stack = []   # Del 删除前的行快照栈，供 Ctrl+Z 撤销
+        # 快捷键（编辑单元格时由编辑器处理，不会触发）：
+        # Del 删除选中 / Ctrl+Z 撤销删除 / Ctrl+↑↓ 上下移动 / Ctrl+C 复制 / Ctrl+D 新增
+        def _seg_keypress(event):
+            key = event.key()
+            ctrl = bool(event.modifiers() & Qt.ControlModifier)
+            if key == Qt.Key_Delete:
+                self._del_segment_row()
+            elif ctrl and key == Qt.Key_Z:
+                self._undo_segment_delete()
+            elif ctrl and key == Qt.Key_Up:
+                self._move_segment_row(-1)
+            elif ctrl and key == Qt.Key_Down:
+                self._move_segment_row(1)
+            elif ctrl and key == Qt.Key_C:
+                self._copy_segments()
+            elif ctrl and key == Qt.Key_D:
+                self._add_segment_row()
+            else:
+                QTableWidget.keyPressEvent(self.table_segments, event)
+        self.table_segments.keyPressEvent = _seg_keypress
         self.table_segments.setMinimumHeight(280)
         left_layout.addWidget(self.table_segments, stretch=1)
 
@@ -2415,6 +2438,13 @@ class WorkbenchPage(QWidget):
         self.table_segments.setItem(row, 1, QTableWidgetItem("00:00:05.000"))
 
     def _del_segment_row(self):
+        # 记录删除前的全部行，供 Ctrl+Z 撤销
+        snap = []
+        for r in range(self.table_segments.rowCount()):
+            s = self.table_segments.item(r, 0)
+            e = self.table_segments.item(r, 1)
+            snap.append((s.text() if s else "", e.text() if e else ""))
+        self._segment_undo_stack.append(snap)
         rows = sorted(set(idx.row() for idx in self.table_segments.selectedIndexes()), reverse=True)
         for r in rows:
             self.table_segments.removeRow(r)
@@ -2423,23 +2453,81 @@ class WorkbenchPage(QWidget):
         self._update_preview()
         self._validate_segments()
 
+    def _undo_segment_delete(self):
+        """Ctrl+Z：恢复最近一次 Del 删除前的行"""
+        if not getattr(self, '_segment_undo_stack', None):
+            return
+        snap = self._segment_undo_stack.pop()
+        self.table_segments.blockSignals(True)
+        self.table_segments.setRowCount(0)
+        for s, e in snap:
+            r = self.table_segments.rowCount()
+            self.table_segments.insertRow(r)
+            self.table_segments.setItem(r, 0, QTableWidgetItem(s))
+            self.table_segments.setItem(r, 1, QTableWidgetItem(e))
+        self.table_segments.blockSignals(False)
+        self._update_preview()
+        self._validate_segments()
+
     def _move_segment_row(self, direction: int):
-        """上下移动选中的段（direction: -1 上移, +1 下移）"""
-        rows = sorted(set(idx.row() for idx in self.table_segments.selectedIndexes()))
-        if not rows:
+        """整体上下移动选中的段（支持多行连续选区），移动后选中行数保持不变"""
+        n = self.table_segments.rowCount()
+        cols = self.table_segments.columnCount()
+        selected = sorted(set(idx.row() for idx in self.table_segments.selectedIndexes()))
+        if not selected:
             return
-        # 只移动第一个选中的行（连续选区视为一块整体）
-        r = rows[0]
-        new_r = r + direction
-        if new_r < 0 or new_r >= self.table_segments.rowCount():
+        # 整体移动：上移要求最上一行不在顶；下移要求最下一行不在底
+        if direction < 0 and selected[0] <= 0:
             return
-        # 交换两行数据
-        for col in range(self.table_segments.columnCount()):
-            item_a = self.table_segments.takeItem(r, col)
-            item_b = self.table_segments.takeItem(new_r, col)
-            self.table_segments.setItem(r, col, item_b)
-            self.table_segments.setItem(new_r, col, item_a)
-        self.table_segments.selectRow(new_r)
+        if direction > 0 and selected[-1] >= n - 1:
+            return
+
+        # 取出全部行数据（先 takeItem，避免 setItem 时重复持有）
+        data = [[self.table_segments.takeItem(r, c) for c in range(cols)] for r in range(n)]
+
+        # 划分连续选区（run），每个 run 整体平移一位
+        runs = []
+        start = prev = selected[0]
+        for r in selected[1:]:
+            if r == prev + 1:
+                prev = r
+            else:
+                runs.append((start, prev))
+                start = prev = r
+        runs.append((start, prev))
+
+        new_selected = []
+        if direction < 0:
+            # 上移：每个 run [s..e] 与其上方一行交换 → 占据 [s-1..e-1]
+            for s, e in runs:
+                top = data[s - 1]
+                for i in range(s - 1, e):
+                    data[i] = data[i + 1]
+                data[e] = top
+                new_selected.extend(range(s - 1, e))
+        else:
+            # 下移：每个 run [s..e] 与其下方一行交换 → 占据 [s+1..e+1]
+            for s, e in runs:
+                bot = data[e + 1]
+                for i in range(e + 1, s, -1):
+                    data[i] = data[i - 1]
+                data[s] = bot
+                new_selected.extend(range(s + 1, e + 2))
+
+        # 写回
+        self.table_segments.blockSignals(True)
+        for r in range(n):
+            for c in range(cols):
+                self.table_segments.setItem(r, c, data[r][c])
+        self.table_segments.blockSignals(False)
+
+        # 重新选中移动后的行（先清空再选，保证选中行数不变、不累加）
+        self.table_segments.clearSelection()
+        sm = self.table_segments.selectionModel()
+        flags = QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows
+        for r in new_selected:
+            sm.select(self.table_segments.model().index(r, 0), flags)
+
         self._update_preview()
         self._validate_segments()
 
@@ -2448,6 +2536,9 @@ class WorkbenchPage(QWidget):
         segs = self._get_segments()
         if len(segs) <= 1:
             return
+        # 排序后清空撤销栈（顺序已变，旧快照不再适用）
+        if hasattr(self, '_segment_undo_stack'):
+            self._segment_undo_stack.clear()
         # 按起始时间排序
         segs.sort(key=lambda s: s[0])
         self.table_segments.blockSignals(True)
@@ -2537,6 +2628,8 @@ class WorkbenchPage(QWidget):
                 self.table_segments.insertRow(row)
                 self.table_segments.setItem(row, 0, QTableWidgetItem(parts[0].strip()))
                 self.table_segments.setItem(row, 1, QTableWidgetItem(parts[1].strip()))
+        if hasattr(self, '_segment_undo_stack'):
+            self._segment_undo_stack.clear()
         self._update_preview()
 
     def _get_segments(self) -> list:
