@@ -62,7 +62,7 @@ QPalette = QtGui.QPalette
 QColor = QtGui.QColor
 from movie_core import (
     Actor, ActorManager, Project, ProjectManager,
-    NamingEngine, FFmpegEngine, PathHelper, app_data_dir, resource_path
+    NamingEngine, FFmpegEngine, PathHelper, TaskManager, app_data_dir, resource_path
 )
 
 
@@ -1174,6 +1174,480 @@ class ProjectListPage(QWidget):
             self._refresh_list()
 
 
+class ThumbExtractor(QThread):
+    """后台为成功任务的输出文件生成缩略图（视频抽帧 / GIF 取首帧）"""
+    done = pyqtSignal()
+
+    def __init__(self, jobs):
+        super().__init__()
+        self.jobs = jobs   # [(task_id, output_path), ...]
+
+    @staticmethod
+    def _probe_duration(path) -> float:
+        import subprocess, re
+        try:
+            r = subprocess.run(f'ffmpeg -i "{path}"', shell=True, capture_output=True,
+                               text=True, encoding='utf-8', errors='replace')
+            m = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', r.stderr or '')
+            if m:
+                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        except Exception:
+            pass
+        return 0.0
+
+    def run(self):
+        import subprocess
+        thumb_dir = app_data_dir() / "tmp" / "thumbs"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        for tid, out in self.jobs:
+            thumb = thumb_dir / f"{tid}.png"
+            if thumb.exists() or str(out).lower().endswith(".gif"):
+                continue   # GIF 不抽帧（面板直读首帧，预览播放动图）
+            dur = self._probe_duration(out)
+            candidates = [f"{dur / 2:.3f}"] if dur > 0 else ["1", "0.5", "0"]
+            for ss in candidates:
+                cmd = f'ffmpeg -y -ss {ss} -i "{out}" -frames:v 1 -vf "scale=640:-1" "{thumb}"'
+                subprocess.run(cmd, shell=True, capture_output=True)
+                if thumb.exists() and thumb.stat().st_size > 0:
+                    break
+        self.done.emit()
+
+
+class _PreviewFrameExtractor(QThread):
+    """后台为预览抽取多帧（contact sheet 素材）；Qt 拼接在主线程完成"""
+    done = pyqtSignal(int)
+
+    def __init__(self, tid, out, n=9):
+        super().__init__()
+        self.tid = tid
+        self.out = out
+        self.n = n
+
+    def run(self):
+        import subprocess
+        try:
+            dur = ThumbExtractor._probe_duration(self.out)
+            if dur > 0:
+                tmp_dir = app_data_dir() / "tmp" / "thumbs" / f"_sheet_{self.tid}"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                for i in range(self.n):
+                    t = dur * (i + 0.5) / self.n
+                    fp = tmp_dir / f"{i}.png"
+                    subprocess.run(
+                        f'ffmpeg -y -ss {t:.3f} -i "{self.out}" -frames:v 1 -vf "scale=320:-1" "{fp}"',
+                        shell=True, capture_output=True)
+        except Exception:
+            pass
+        self.done.emit(self.tid)
+
+
+class _ElideMiddleDelegate(QtWidgets.QStyledItemDelegate):
+    """文件名列：过长时中间省略（保留开头与结尾），自适应列宽。"""
+    def paint(self, painter, option, index):
+        text = index.data(Qt.DisplayRole)
+        painter.save()
+        if option.state & QtWidgets.QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.brush(QtGui.QPalette.Highlight))
+            painter.setPen(option.palette.color(QtGui.QPalette.HighlightedText))
+        else:
+            painter.setPen(option.palette.color(QtGui.QPalette.Text))
+        rect = option.rect.adjusted(6, 0, -6, 0)
+        elided = option.fontMetrics.elidedText(
+            str(text) if text is not None else "", Qt.ElideMiddle, rect.width())
+        painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
+        painter.restore()
+
+
+class TaskListDialog(QDialog):
+    """任务列表面板：查看 进行中/成功/失败/未进行 的任务，支持恢复、终止、删除；成功任务有缩略图，双击预览"""
+    STATUS_COLOR = {"进行中": "#e67e22", "成功": "#27ae60", "失败": "#e74c3c", "未进行": "#95a5a6"}
+
+    def __init__(self, workbench):
+        super().__init__(workbench)
+        self.workbench = workbench
+        self.setWindowTitle("任务列表")
+        self.setMinimumSize(820, 460)
+        self.resize(1080, 560)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
+        self._thumb_busy = False
+        self._thumb_worker = None
+        self._sheet_workers = []   # 预览用 contact-sheet 后台抽取线程
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        top = QHBoxLayout()
+        btn_save = QPushButton("💾 保存当前为任务")
+        btn_save.setToolTip("把当前工作台配置（时间段/参数/演员）存为一个「未进行」任务，便于以后恢复重剪")
+        btn_save.clicked.connect(self._on_save_preset)
+        top.addWidget(btn_save)
+        top.addStretch()
+        self.lbl_count = QLabel("暂无任务")
+        self.lbl_count.setStyleSheet("color:#7f8c8d;")
+        top.addWidget(self.lbl_count)
+        layout.addLayout(top)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["缩略图", "类型", "状态", "时间", "输出文件", "操作"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setIconSize(QtCore.QSize(96, 56))
+        self.table.setColumnWidth(0, 110)
+        self.table.setColumnWidth(1, 56)
+        self.table.setColumnWidth(2, 70)
+        self.table.setColumnWidth(3, 135)
+        self.table.setColumnWidth(5, 160)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.setItemDelegateForColumn(4, _ElideMiddleDelegate(self.table))
+        self.table.cellDoubleClicked.connect(self._on_cell_double_click)
+        layout.addWidget(self.table)
+        self.refresh()
+
+    def _on_save_preset(self):
+        self.workbench._save_task_preset()
+
+    def _thumb_path(self, tid):
+        return app_data_dir() / "tmp" / "thumbs" / f"{tid}.png"
+
+    def _sheet_path(self, tid):
+        return app_data_dir() / "tmp" / "thumbs" / f"{tid}_sheet.png"
+
+    def _extract_thumb_sync(self, tid, out):
+        """同步抽一帧（预览时后台缓存尚未就绪的兜底）"""
+        import subprocess
+        try:
+            thumb = self._thumb_path(tid)
+            thumb.parent.mkdir(parents=True, exist_ok=True)
+            dur = ThumbExtractor._probe_duration(out)
+            cands = [f"{dur / 2:.3f}"] if dur > 0 else ["1", "0.5", "0"]
+            for ss in cands:
+                subprocess.run(
+                    f'ffmpeg -y -ss {ss} -i "{out}" -frames:v 1 -vf "scale=640:-1" "{thumb}"',
+                    shell=True, capture_output=True)
+                if thumb.exists() and thumb.stat().st_size > 0:
+                    break
+        except Exception:
+            pass
+
+    def _finalize_contact_sheet(self, tid, cols=3, rows=3):
+        """主线程：把后台抽好的多帧拼成 contact sheet 缓存"""
+        try:
+            n = cols * rows
+            sheet = self._sheet_path(tid)
+            tmp_dir = sheet.parent / f"_sheet_{tid}"
+            frame_files = [tmp_dir / f"{i}.png" for i in range(n)]
+            frame_files = [f for f in frame_files if f.exists() and f.stat().st_size > 0]
+            pixmaps = [QtGui.QPixmap(str(f)) for f in frame_files]
+            pixmaps = [p for p in pixmaps if not p.isNull()]
+            for f in frame_files:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            try:
+                tmp_dir.rmdir()
+            except Exception:
+                pass
+            if not pixmaps:
+                return
+            fw = max(p.width() for p in pixmaps)
+            fh = max(p.height() for p in pixmaps)
+            gap = 2
+            sheet_pix = QtGui.QPixmap(cols * fw + (cols + 1) * gap,
+                                      rows * fh + (rows + 1) * gap)
+            sheet_pix.fill(QtCore.Qt.black)
+            painter = QtGui.QPainter(sheet_pix)
+            for idx, p in enumerate(pixmaps[:n]):
+                r = idx // cols
+                c = idx % cols
+                x = gap + c * (fw + gap) + (fw - p.width()) // 2
+                y = gap + r * (fh + gap) + (fh - p.height()) // 2
+                painter.drawPixmap(x, y, p)
+            painter.end()
+            sheet_pix.save(str(sheet), "PNG")
+        except Exception:
+            pass
+
+    def refresh(self):
+        wb = self.workbench
+        if not wb.project:
+            return
+        tasks = wb.task_manager.list_for_project(wb.project.id)
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(tasks))
+        for row, t in enumerate(tasks):
+            self.table.setRowHeight(row, 64)
+            thumb_item = QTableWidgetItem()
+            thumb_item.setData(Qt.UserRole, t["id"])
+            self._load_thumb(thumb_item, t)
+            self.table.setItem(row, 0, thumb_item)
+            self.table.setItem(row, 1, QTableWidgetItem(t.get("tag") or ""))
+            st = t.get("status") or ""
+            st_item = QTableWidgetItem(st)
+            st_item.setForeground(QtGui.QColor(self.STATUS_COLOR.get(st, "#333333")))
+            self.table.setItem(row, 2, st_item)
+            self.table.setItem(row, 3, QTableWidgetItem(t.get("created_at") or ""))
+            out = t.get("output_path") or ""
+            name_item = QTableWidgetItem(Path(out).name if out else "—")
+            if out:
+                name_item.setToolTip(str(out))
+            self.table.setItem(row, 4, name_item)
+            self.table.setCellWidget(row, 5, self._make_actions(t["id"], st))
+        from collections import Counter
+        c = Counter((t.get("status") or "") for t in tasks)
+        self.lbl_count.setText("  |  ".join(f"{k} {v}" for k, v in c.items()) if c else "暂无任务")
+        self._kickoff_thumbnails(tasks)
+
+    def _load_thumb(self, item, task: dict):
+        """成功任务：GIF 直读首帧；视频用抽帧缓存"""
+        if task.get("status") != "成功":
+            return
+        out = task.get("output_path") or ""
+        if not out:
+            return
+        if str(out).lower().endswith(".gif"):
+            pix = QtGui.QPixmap(out)
+        else:
+            thumb = self._thumb_path(task["id"])
+            pix = QtGui.QPixmap(str(thumb)) if thumb.exists() else QtGui.QPixmap()
+        if not pix.isNull():
+            item.setIcon(QtGui.QIcon(pix))
+
+    def _kickoff_thumbnails(self, tasks):
+        if self._thumb_busy:
+            return
+        jobs = []
+        for t in tasks:
+            if t.get("status") == "成功" and t.get("output_path"):
+                out = t["output_path"]
+                if str(out).lower().endswith(".gif"):
+                    continue   # GIF 面板图标直读首帧，无需抽帧
+                if not self._thumb_path(t["id"]).exists() and Path(out).exists():
+                    jobs.append((t["id"], out))
+        if not jobs:
+            return
+        self._thumb_busy = True
+        self._thumb_worker = ThumbExtractor(jobs)
+        self._thumb_worker.done.connect(self._on_thumbs_done)
+        self._thumb_worker.start()
+
+    def _on_thumbs_done(self):
+        self._thumb_busy = False
+        self.refresh()
+
+    def _on_cell_double_click(self, row, col):
+        if col != 0:
+            return
+        item = self.table.item(row, 0)
+        st_item = self.table.item(row, 2)
+        if not item or not st_item or st_item.text() != "成功":
+            return
+        tid = item.data(Qt.UserRole)
+        if tid is not None:
+            self._show_task_preview(int(tid))
+
+    def _make_actions(self, tid: int, status: str):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(2, 2, 2, 2)
+        h.setSpacing(4)
+        btn_r = QPushButton("恢复")
+        btn_r.clicked.connect(lambda *a, tid=tid: self.workbench._restore_task(tid))
+        h.addWidget(btn_r)
+        if status == "进行中":
+            btn_t = QPushButton("终止")
+            btn_t.setStyleSheet("color:#e74c3c;")
+            btn_t.clicked.connect(lambda *a, tid=tid: self.workbench._terminate_task(tid))
+            h.addWidget(btn_t)
+        else:
+            btn_d = QPushButton("删除")
+            btn_d.setStyleSheet("color:#e74c3c;")
+            btn_d.clicked.connect(lambda *a, tid=tid: self.workbench._delete_task(tid))
+            h.addWidget(btn_d)
+        return w
+
+    def _show_task_preview(self, start_tid):
+        wb = self.workbench
+        if not wb.project:
+            return
+        tasks = [t for t in wb.task_manager.list_for_project(wb.project.id)
+                 if t.get("status") == "成功" and t.get("output_path")]
+        if not tasks:
+            return
+        ids = [t["id"] for t in tasks]
+        try:
+            pos = ids.index(start_tid)
+        except ValueError:
+            pos = 0
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("任务预览")
+        dlg.setMinimumSize(560, 440)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        # GIF 用 QMovie 动图；视频显示抽帧缩略图，可用系统播放器打开完整视频
+        lbl_img = QLabel()
+        lbl_img.setAlignment(Qt.AlignCenter)
+        lbl_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        lbl_img.setMinimumSize(440, 300)
+        layout.addWidget(lbl_img, stretch=1)
+
+        movie = {"obj": None}
+
+        ctrl = QHBoxLayout()
+        btn_open = QPushButton("播放")
+        btn_open.setFocusPolicy(Qt.NoFocus)
+        btn_open.setVisible(False)
+        ctrl.addWidget(btn_open)
+        ctrl.addStretch()
+        info_lbl = QLabel()
+        info_lbl.setStyleSheet("color:#7f8c8d;")
+        ctrl.addWidget(info_lbl)
+        ctrl.addStretch()
+        btn_prev = QPushButton("◀ 上一张")
+        btn_prev.setFocusPolicy(Qt.NoFocus)
+        btn_next = QPushButton("下一张 ▶")
+        btn_next.setFocusPolicy(Qt.NoFocus)
+        ctrl.addWidget(btn_prev)
+        ctrl.addWidget(btn_next)
+        hint_lbl = QLabel("←→ 切换 · Del 删除")
+        hint_lbl.setStyleSheet("color:#bdc3c7;")
+        ctrl.addWidget(hint_lbl)
+        layout.addLayout(ctrl)
+        dlg.setFocusPolicy(Qt.StrongFocus)
+        dlg.setFocus()
+
+        state = {"pos": pos, "ids": ids, "out": "", "viewing": None, "outs": {}, "alive": True}
+
+        def stop_current():
+            if movie["obj"]:
+                movie["obj"].stop()
+                movie["obj"] = None
+
+        def open_player():
+            out = state.get("out")
+            if out:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(out))
+
+        def load(p):
+            n = len(state["ids"])
+            if n == 0:
+                dlg.close()
+                return
+            if p < 0 or p >= n:
+                return
+            state["pos"] = p
+            stop_current()
+            tid = state["ids"][p]
+            state["viewing"] = tid
+            tinfo = wb.task_manager.get(tid) or {}
+            out = tinfo.get("output_path") or ""
+            state["out"] = out
+            state["outs"][tid] = out
+            is_gif = out.lower().endswith(".gif")
+            info_lbl.setText(f"{tinfo.get('tag', '')} · {Path(out).name if out else ''}")
+            dlg.setWindowTitle(f"任务预览 ({p + 1}/{n})")
+            lbl_img.setMovie(None)
+            lbl_img.clear()
+            if is_gif:
+                m = QtGui.QMovie(out)
+                if m.isValid():
+                    lbl_img.setMovie(m)
+                    m.start()
+                    movie["obj"] = m
+                else:
+                    lbl_img.setText("(无法加载动图)")
+                btn_open.setVisible(False)
+            else:
+                # 视频：多帧拼图（contact sheet）+ 播放按钮
+                btn_open.setVisible(True)
+                sheet = self._sheet_path(tid)
+                pix = QtGui.QPixmap(str(sheet)) if sheet.exists() else QtGui.QPixmap()
+                if not pix.isNull():
+                    screen = QApplication.primaryScreen().availableGeometry()
+                    lbl_img.setPixmap(pix.scaled(int(screen.width() * 0.7), int(screen.height() * 0.65),
+                                                 Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                else:
+                    # 未缓存：先提示，后台抽帧，完成后主线程拼接并展示
+                    lbl_img.setText("正在生成预览拼图…")
+                    worker = _PreviewFrameExtractor(tid, out)
+
+                    def on_done(done_tid, _state=state, _lbl=lbl_img, _w=worker):
+                        self._finalize_contact_sheet(done_tid)
+                        try:
+                            self._sheet_workers.remove(_w)
+                        except Exception:
+                            pass
+                        if not _state.get("alive") or _state.get("viewing") != done_tid:
+                            return
+                        sh = self._sheet_path(done_tid)
+                        p2 = QtGui.QPixmap(str(sh)) if sh.exists() else QtGui.QPixmap()
+                        if p2.isNull():
+                            _lbl.setText("(无缩略图)")
+                        else:
+                            screen = QApplication.primaryScreen().availableGeometry()
+                            _lbl.setPixmap(p2.scaled(int(screen.width() * 0.7), int(screen.height() * 0.65),
+                                                     Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+                    worker.done.connect(on_done)
+                    self._sheet_workers.append(worker)
+                    worker.start()
+            btn_prev.setEnabled(p > 0)
+            btn_next.setEnabled(p < n - 1)
+
+        def go_prev():
+            if state["pos"] > 0:
+                load(state["pos"] - 1)
+
+        def go_next():
+            if state["pos"] < len(state["ids"]) - 1:
+                load(state["pos"] + 1)
+
+        def delete_cur():
+            if not state["ids"]:
+                return
+            tid = state["ids"][state["pos"]]
+            wb._delete_task(tid)
+            try:
+                self._thumb_path(tid).unlink()
+            except Exception:
+                pass
+            state["ids"].pop(state["pos"])
+            if not state["ids"]:
+                dlg.close()
+                return
+            if state["pos"] >= len(state["ids"]):
+                state["pos"] = len(state["ids"]) - 1
+            load(state["pos"])
+
+        btn_prev.clicked.connect(go_prev)
+        btn_next.clicked.connect(go_next)
+        btn_open.clicked.connect(open_player)
+
+        def key(event):
+            k = event.key()
+            if k == Qt.Key_Left:
+                go_prev()
+            elif k == Qt.Key_Right:
+                go_next()
+            elif k == Qt.Key_Delete:
+                delete_cur()
+            elif k == Qt.Key_Escape:
+                dlg.close()
+            else:
+                QDialog.keyPressEvent(dlg, event)
+
+        dlg.keyPressEvent = key
+
+        def on_finished(*_):
+            state["alive"] = False
+            stop_current()
+        dlg.finished.connect(on_finished)
+        load(pos)
+        dlg.exec_()
+
+
 class WorkbenchPage(QWidget):
     """剪辑工作台：剪辑时强制要求演员"""
     back_signal = pyqtSignal()
@@ -1185,6 +1659,9 @@ class WorkbenchPage(QWidget):
         self.actor_manager = actor_manager
         self.project: Optional[Project] = None
         self._workers: list = []  # 后台任务列表，支持并行
+        self.task_manager = TaskManager()
+        self._running_tasks: dict = {}  # task_id -> {worker, engine, tag, output_path, terminated}
+        self._task_dlg = None           # 任务列表面板（打开时引用）
         self._build_ui()
 
     def _build_ui(self):
@@ -1208,6 +1685,11 @@ class WorkbenchPage(QWidget):
         btn_archive.setToolTip("按国家→演员→电影归类整理输出目录中的文件")
         btn_archive.clicked.connect(self._on_archive)
         info_bar.addWidget(btn_archive)
+
+        btn_tasks = QPushButton("任务")
+        btn_tasks.setToolTip("查看/管理任务：进行中·成功·失败·未进行；可恢复、终止、删除")
+        btn_tasks.clicked.connect(self._open_task_panel)
+        info_bar.addWidget(btn_tasks)
 
         btn_back = QPushButton("退出")
         btn_back.clicked.connect(self.back_signal.emit)
@@ -1329,14 +1811,14 @@ class WorkbenchPage(QWidget):
         self.txt_log.clear()
         self.log(f"[INFO] 进入工作台: {project.display_name}")
 
+        # 上次残留的「进行中」任务（进程已不存在）标记为「未进行」
+        self.task_manager.mark_stale_running(project.id)
+
         # 恢复上次状态
         self._restore_state()
 
-    def _save_state(self):
-        """保存当前工作台状态到数据库"""
-        if not self.project:
-            return
-        import json
+    def _build_state(self) -> dict:
+        """构建当前工作台状态快照（保存项目状态 / 任务快照共用）"""
         segs = []
         if hasattr(self, 'table_segments'):
             segs = self._get_segments()
@@ -1370,21 +1852,32 @@ class WorkbenchPage(QWidget):
             sel = self.tabs.widget(i).findChild(ActorSelector)
             if sel:
                 state["actors_per_tab"][str(i)] = sel.get_actor_ids()
-        self.manager.save_state(self.project.id, json.dumps(state, ensure_ascii=False))
+        return state
 
-    def _restore_state(self):
-        """从数据库恢复上次工作台状态"""
+    def _snapshot_state_for_task(self) -> dict:
+        """任务快照：仅当时间段只有一行且为未改动的默认占位（00:00:00.000–00:00:05.000）时才视为空；
+        其余情况（含多段中混有 0–5s）原样保留。"""
+        state = self._build_state()
+        DEFAULT = ("00:00:00.000", "00:00:05.000")
+        vid = state.get("video", {})
+        segs = [tuple(s) for s in vid.get("segments", [])]
+        if len(segs) == 1 and segs[0] == DEFAULT:
+            vid["segments"] = []   # 仅初始占位，不算真实任务
+        else:
+            vid["segments"] = segs
+        return state
+
+    def _save_state(self):
+        """保存当前工作台状态到数据库"""
         if not self.project:
             return
         import json
-        raw = self.manager.load_state(self.project.id)
-        if not raw:
-            return
-        try:
-            state = json.loads(raw)
-        except Exception:
-            return
-        # 恢复 GIF 参数
+        state = self._build_state()
+        self.manager.save_state(self.project.id, json.dumps(state, ensure_ascii=False))
+
+    def _apply_state(self, state: dict):
+        """把状态快照应用到工作台（恢复上次状态 / 恢复任务共用）"""
+        # GIF 参数
         g = state.get("gif", {})
         if g:
             self.ed_gif_start.setText(g.get("start", "00:00:00.000"))
@@ -1398,7 +1891,7 @@ class WorkbenchPage(QWidget):
             self.spin_contrast.setValue(g.get("contrast", 1))
             self.chk_speed.setChecked(g.get("speed_enabled", False))
             self.spin_speed.setValue(g.get("speed", 1))
-        # 恢复视频参数
+        # 视频参数
         v = state.get("video", {})
         if v:
             self.chk_copy.setChecked(v.get("copy", False))
@@ -1417,7 +1910,9 @@ class WorkbenchPage(QWidget):
                     self.table_segments.setItem(r, 0, QTableWidgetItem(s))
                     self.table_segments.setItem(r, 1, QTableWidgetItem(e))
                 self.table_segments.blockSignals(False)
-        # 恢复各 Tab 演员选择
+                if hasattr(self, '_segment_undo_stack'):
+                    self._segment_undo_stack.clear()
+        # 各 Tab 演员选择
         ap = state.get("actors_per_tab", {})
         for i_str, ids in ap.items():
             i = int(i_str)
@@ -1425,9 +1920,23 @@ class WorkbenchPage(QWidget):
                 sel = self.tabs.widget(i).findChild(ActorSelector)
                 if sel:
                     sel.set_actor_ids(ids)
-        # 恢复 Tab
+        # Tab
         self.tabs.setCurrentIndex(state.get("tab", 0))
         self._update_preview()
+
+    def _restore_state(self):
+        """从数据库恢复上次工作台状态"""
+        if not self.project:
+            return
+        import json
+        raw = self.manager.load_state(self.project.id)
+        if not raw:
+            return
+        try:
+            state = json.loads(raw)
+        except Exception:
+            return
+        self._apply_state(state)
 
     def _on_edit_project(self):
         if not self.project:
@@ -1511,6 +2020,13 @@ class WorkbenchPage(QWidget):
         adv_layout.setColumnStretch(4, 1)
         left_layout.addWidget(adv)
         left_layout.addStretch()
+        btn_save_gif = QPushButton("保存当前任务")
+        btn_save_gif.setToolTip("把当前 GIF 配置存为一个「未进行」任务，便于以后恢复")
+        btn_save_gif.clicked.connect(self._save_task_preset)
+        _save_row = QHBoxLayout()
+        _save_row.addStretch()
+        _save_row.addWidget(btn_save_gif)
+        left_layout.addLayout(_save_row)
 
         for w in [self.chk_brightness, self.spin_brightness, self.chk_contrast,
                   self.spin_contrast, self.chk_speed, self.spin_speed]:
@@ -1648,6 +2164,13 @@ class WorkbenchPage(QWidget):
         opts_layout.setColumnStretch(4, 1)
         left_layout.addWidget(opts)
         left_layout.addStretch()
+        btn_save_vid = QPushButton("保存当前任务")
+        btn_save_vid.setToolTip("把当前视频剪辑配置存为一个「未进行」任务，便于以后恢复")
+        btn_save_vid.clicked.connect(self._save_task_preset)
+        _save_row = QHBoxLayout()
+        _save_row.addStretch()
+        _save_row.addWidget(btn_save_vid)
+        left_layout.addLayout(_save_row)
 
         # === 右侧：演员选择 ===
         right = QWidget()
@@ -2872,22 +3395,137 @@ class WorkbenchPage(QWidget):
                 self._launch_ffmpeg_task("拼接", "concat", **kwargs)
 
     def _launch_ffmpeg_task(self, tag: str, mode: str, **kwargs):
-        """启动后台 FFmpeg 任务，支持多任务并行"""
+        """启动后台 FFmpeg 任务，支持多任务并行；同时记录到任务面板"""
+        import json
         self.log(f"── {tag} 开始 ──")
         engine = FFmpegEngine()
         worker = Worker(engine, mode, **kwargs)
+        # 任务快照 + 持久化记录
+        state = self._snapshot_state_for_task()
+        task_id = self.task_manager.create(
+            self.project.id, mode, tag, "进行中", "",
+            json.dumps(state, ensure_ascii=False))
         worker.log_signal.connect(lambda msg, t=tag: self.log(f"[{t}] {msg}"))
-        worker.done_signal.connect(lambda ok, path, t=tag: self._on_task_done(t, ok, path))
+        worker.done_signal.connect(lambda ok, path, tid=task_id: self._on_task_done(tid, ok, path))
         worker.start()
-        # 保持引用防止被 GC，清理已完成的任务
+        self._running_tasks[task_id] = {
+            "worker": worker, "engine": engine, "tag": tag,
+            "output_path": "", "terminated": False,
+        }
+        # 保持线程引用，清理已完成的任务
         self._workers.append(worker)
         self._workers = [w for w in self._workers if w.isRunning()]
+        self._refresh_task_panel()
 
-    def _on_task_done(self, tag: str, ok: bool, path: str):
+    def _on_task_done(self, task_id: int, ok: bool, path: str):
+        info = self._running_tasks.pop(task_id, None)
+        if info is None:
+            return  # 已被终止流程处理
         if ok and path:
-            self.log(f"[{tag}] ✓ {Path(path).name}")
+            self.task_manager.update_status(task_id, "成功", path)
+            self.log(f"[{info['tag']}] ✓ {Path(path).name}")
         else:
-            self.log(f"[{tag}] ✗ 失败")
+            self.task_manager.update_status(task_id, "失败")
+            self.log(f"[{info['tag']}] ✗ 失败")
+        self._refresh_task_panel()
+
+    def _terminate_task(self, task_id: int):
+        info = self._running_tasks.get(task_id)
+        if not info:
+            return
+        info["terminated"] = True
+        engine = info["engine"]
+        engine.kill()
+        self._cleanup_task_files(engine, info["tag"])
+        self._running_tasks.pop(task_id, None)
+        self.task_manager.update_status(task_id, "未进行", "")
+        self.log(f"[{info['tag']}] ⊘ 已终止")
+        self._refresh_task_panel()
+
+    def _cleanup_task_files(self, engine, tag: str):
+        """终止后清理未完成文件：输出文件 + 拼接临时段"""
+        out = getattr(engine, "target_path", None)
+        self._safe_unlink(out)
+        if tag == "拼接":
+            try:
+                tmp_dir = app_data_dir() / "tmp" / "concat"
+                for f in tmp_dir.glob("*.mp4"):
+                    self._safe_unlink(f)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _safe_unlink(path, tries: int = 6, delay: float = 0.1):
+        """删除文件，容忍终止后短暂的句柄占用（重试几次）"""
+        import time
+        if not path:
+            return
+        p = Path(path)
+        for _ in range(tries):
+            try:
+                if p.exists():
+                    p.unlink()
+                return
+            except Exception:
+                time.sleep(delay)
+
+    def _refresh_task_panel(self):
+        if self._task_dlg is not None and self._task_dlg.isVisible():
+            # 延迟到下一轮事件循环，避免在按钮信号处理中销毁按钮 widget
+            QTimer.singleShot(0, self._task_dlg.refresh)
+
+    def _open_task_panel(self):
+        if self._task_dlg is None:
+            self._task_dlg = TaskListDialog(self)
+        self._task_dlg.refresh()
+        self._task_dlg.show()
+        self._task_dlg.raise_()
+        self._task_dlg.activateWindow()
+
+    def _save_task_preset(self):
+        """把当前工作台配置存为一个「未进行」任务"""
+        if not self.project:
+            return
+        import json
+        tab = self.tabs.currentIndex()
+        type_ = "gif" if tab == 0 else "video"
+        tag = "GIF" if tab == 0 else "视频"
+        state = self._snapshot_state_for_task()
+        self.task_manager.create(self.project.id, type_, tag, "未进行", "",
+                                 json.dumps(state, ensure_ascii=False))
+        self.log("[任务] 已保存当前配置为任务")
+        self._refresh_task_panel()
+
+    def _restore_task(self, task_id: int):
+        """恢复任务：把任务的完整快照载入工作台"""
+        if not self.project:
+            return
+        import json
+        t = self.task_manager.get(task_id)
+        if not t:
+            return
+        try:
+            state = json.loads(t.get("state_json") or "{}")
+        except Exception:
+            return
+        self._apply_state(state)
+        self.log(f"[任务] 已载入任务配置（{t.get('tag')}）")
+
+    def _delete_task(self, task_id: int):
+        """删除任务：记录 + 输出文件（移至回收站）"""
+        if task_id in self._running_tasks:
+            self._terminate_task(task_id)
+        t = self.task_manager.get(task_id)
+        if not t:
+            return
+        out = t.get("output_path") or ""
+        if out and Path(out).exists():
+            result = QtCore.QFile.moveToTrash(str(out))
+            ok = result[0] if isinstance(result, tuple) else result
+            if not ok:
+                self.log(f"[任务] 输出文件删除失败：{Path(out).name}")
+        self.task_manager.delete(task_id)
+        self._refresh_task_panel()
 
     def _open_target_dir(self):
         import subprocess

@@ -3,6 +3,7 @@ Movie Toolkit Core
 项目制 + 演员库：项目ID只用影视名，创建时可无演员，剪辑时强制要求演员
 """
 import os
+import platform
 import re
 import subprocess
 import sqlite3
@@ -479,6 +480,69 @@ class NamingEngine:
         return f"[{proj.country}]{actors} » {movie}.{proj.year}{se}-{count}.{ext}"
 
 
+class TaskManager:
+    """任务记录持久化（按项目）。状态：进行中 / 成功 / 失败 / 未进行（预设或被终止）"""
+    def __init__(self, db_path=None):
+        self.db_path = Path(db_path) if db_path else app_data_dir() / "data.db"
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER,
+                type TEXT,
+                tag TEXT,
+                status TEXT,
+                created_at TEXT,
+                output_path TEXT,
+                state_json TEXT
+            )
+        """)
+        self.conn.commit()
+
+    def create(self, project_id, type_, tag, status, output_path, state_json):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO tasks (project_id, type, tag, status, created_at, output_path, state_json) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (project_id, type_, tag, status, ts, output_path or "", state_json or ""))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_status(self, task_id, status, output_path=None):
+        if output_path is not None:
+            self.conn.execute(
+                "UPDATE tasks SET status=?, output_path=? WHERE id=?",
+                (status, output_path, task_id))
+        else:
+            self.conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
+        self.conn.commit()
+
+    def get(self, task_id):
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_for_project(self, project_id):
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id DESC", (project_id,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def delete(self, task_id):
+        self.conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        self.conn.commit()
+
+    def mark_stale_running(self, project_id):
+        """把上次残留的「进行中」任务标记为「未进行」（进程已不存在）"""
+        self.conn.execute(
+            "UPDATE tasks SET status='未进行' WHERE project_id=? AND status='进行中'",
+            (project_id,))
+        self.conn.commit()
+
+
 class PathHelper:
     @staticmethod
     def get_nonconflicting_filename(file_path: Path) -> Path:
@@ -508,24 +572,47 @@ class PathHelper:
 class FFmpegEngine:
     def __init__(self, log_callback=None):
         self.log_callback = log_callback or print
+        self._proc = None
+        self._terminated = False
+        self.target_path = None   # 输出路径，运行后由各方法写入，供终止清理/缩略图
 
     def _run(self, cmd: str) -> Tuple[bool, str]:
         self.log_callback(f"> {cmd}")
         try:
-            result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True,
-                encoding='utf-8', errors='replace'
-            )
-            if result.returncode == 0:
+            kw = dict(shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      text=True, encoding='utf-8', errors='replace')
+            if platform.system() == "Windows":
+                # 独立进程组，便于 taskkill /T 杀掉 ffmpeg 子进程树
+                kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            self._proc = subprocess.Popen(cmd, **kw)
+            _out, err = self._proc.communicate()
+            rc = self._proc.returncode
+            if self._terminated and rc != 0:
+                self.log_callback("[STOP] 任务已终止")
+                return False, "terminated"
+            if rc == 0:
                 self.log_callback("[OK] 执行成功")
                 return True, ""
-            else:
-                err = result.stderr[-500:] if result.stderr else "未知错误"
-                self.log_callback(f"[ERR] {err}")
-                return False, err
+            errmsg = err[-500:] if err else "未知错误"
+            self.log_callback(f"[ERR] {errmsg}")
+            return False, errmsg
         except Exception as e:
             self.log_callback(f"[ERR] {e}")
             return False, str(e)
+
+    def kill(self):
+        """终止正在运行的 ffmpeg（Windows 用 taskkill /T 杀进程树）"""
+        self._terminated = True
+        proc = self._proc
+        if proc and proc.poll() is None:
+            try:
+                if platform.system() == "Windows":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                   capture_output=True)
+                else:
+                    proc.kill()
+            except Exception:
+                pass
 
     def make_gif(self, proj: Project, start: str, end: str,
                  width: int = 480, fps: int = 15, colors: int = 64,
@@ -534,6 +621,7 @@ class FFmpegEngine:
         PathHelper.ensure_dir(target_dir)
         raw_name = NamingEngine.gif_name(proj, 1)
         target_path = PathHelper.get_nonconflicting_filename(target_dir / raw_name)
+        self.target_path = target_path
 
         filters = []
         if brightness != 0 or contrast != 1:
@@ -560,6 +648,7 @@ class FFmpegEngine:
         PathHelper.ensure_dir(target_dir)
         raw_name = NamingEngine.video_name(proj, start, end)
         target_path = PathHelper.get_nonconflicting_filename(target_dir / raw_name)
+        self.target_path = target_path
 
         opts = []
         if copy:
@@ -618,6 +707,7 @@ class FFmpegEngine:
         PathHelper.ensure_dir(target_dir)
         raw_name = NamingEngine.concat_name(proj, segments[0][0], segments[-1][1])
         target_path = PathHelper.get_nonconflicting_filename(target_dir / raw_name)
+        self.target_path = target_path
 
         cmd = f'ffmpeg -y -f concat -i "{list_file}" -c copy "{target_path}"'
         ok, _ = self._run(cmd)
