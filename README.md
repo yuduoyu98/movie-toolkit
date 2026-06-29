@@ -74,6 +74,23 @@ python run.py
 | actor_id | INTEGER | NOT NULL | 外键 → actors.id |
 | | | PRIMARY KEY(project_id, actor_id) | 联合主键 |
 
+### tasks（任务表）
+
+记录每个项目的剪辑/GIF 任务（历史与「未进行」预设），供任务面板恢复/终止/删除。
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PK AUTOINCREMENT | 自增主键 |
+| project_id | INTEGER | 所属项目 |
+| type | TEXT | gif / cut / concat / video |
+| tag | TEXT | 显示名（GIF/视频/拼接） |
+| status | TEXT | 进行中 / 成功 / 失败 / 未进行（预设或被终止） |
+| created_at | TEXT | 创建时间 |
+| output_path | TEXT | 输出文件路径（成功任务） |
+| state_json | TEXT | 任务快照（JSON）：Tab/时间段/参数/演员 |
+
+首次启动自动建表（`CREATE TABLE IF NOT EXISTS`），无需迁移。
+
 ## 数据库文件管理
 
 - **备份**：直接复制 `data.db` 文件即可。
