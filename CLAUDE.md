@@ -90,6 +90,10 @@ ffmpeg -y -f concat -i "tmp/concat/filelist.txt" -c copy "{output}"
 
 ## Recent Changes (2026-06-29/30)
 
+- **工作台「播放」源视频 + 任务「导入」改名** — 工作台 `meta_bar` 增加「播放」按钮，用系统播放器打开项目源视频 `source_file_path`（与任务预览的「播放」一致，规避 Qt DirectShow 解码缺失）；`_update_play_source_state` 按项目/文件是否存在启停，缺失时点击弹 `QMessageBox` 警告。任务列表「恢复」按钮改名「导入」（`_restore_task` 行为不变）。
+
+- **删除任务输出文件修复** — 删除成功任务时输出文件未删（被应用占用，打包 exe 尤甚，Explorer 也提示被 exe 占用）。根因：预览 GIF 的 `QMovie(out)` 持有独占文件句柄。修复：GIF 改从内存 `QBuffer` 加载（不再碰磁盘文件，永不占用）；`_delete_task` 删除前先 `release_output`（停 QMovie / 终止抽帧子进程 / 清缩略图）再 `_move_to_trash`（带重试，容忍 Windows 句柄释放延迟）；`ThumbExtractor` / `_PreviewFrameExtractor` 改 `Popen` + `kill()`（taskkill /T）以便删除时释放视频占用。
+
 - **任务系统** — `tasks` 表 + `TaskManager`；`FFmpegEngine` 改 `Popen`，支持终止(`kill()`→`taskkill /F /T`)并清理未完成输出/拼接临时段。任务面板：四态、保存预设/恢复(完整状态载入)/终止/删除(输出移至回收站)；进入项目回收上次残留的「进行中」任务。
 - **任务预览** — GIF 用 `QMovie` 播放动图；视频按时长分级抽帧拼图(<10s 单帧 / <1min 4帧 / <5min 6帧 / ≥5min 9帧)，后台生成+「正在生成」提示；「播放」调系统播放器(规避 Qt DirectShow 解码缺失)。`_ZoomImage` 自适应窗口 + Ctrl+滚轮缩放 + 最大化。
 - **视频剪辑快捷键** — 多选(ExtendedSelection)；Del 删除 / Ctrl+Z 撤销 / Ctrl+C 复制 / Ctrl+D 新增 / Ctrl+↑↓ 连续选区整体移动。

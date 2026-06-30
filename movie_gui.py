@@ -1181,6 +1181,34 @@ class ThumbExtractor(QThread):
     def __init__(self, jobs):
         super().__init__()
         self.jobs = jobs   # [(task_id, output_path), ...]
+        self._procs = []   # 运行中的 ffmpeg 子进程，供 kill() 终止以释放文件占用
+        self._aborted = False
+
+    def kill(self):
+        """终止抽取线程：停止再派生新 ffmpeg，并杀掉已派生的子进程树（释放文件占用）。"""
+        import subprocess, platform
+        self._aborted = True
+        for p in self._procs:
+            try:
+                if p.poll() is None:
+                    if platform.system() == "Windows":
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                                       capture_output=True)
+                    else:
+                        p.kill()
+            except Exception:
+                pass
+        self._procs = []
+
+    def _spawn(self, cmd):
+        """启动 ffmpeg（独立进程组，便于 taskkill /T），并登记到 _procs。"""
+        import subprocess, platform
+        kw = dict(shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if platform.system() == "Windows":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        p = subprocess.Popen(cmd, **kw)
+        self._procs.append(p)
+        return p
 
     @staticmethod
     def _probe_duration(path) -> float:
@@ -1196,18 +1224,27 @@ class ThumbExtractor(QThread):
         return 0.0
 
     def run(self):
-        import subprocess
         thumb_dir = app_data_dir() / "tmp" / "thumbs"
         thumb_dir.mkdir(parents=True, exist_ok=True)
         for tid, out in self.jobs:
+            if self._aborted:
+                break
             thumb = thumb_dir / f"{tid}.png"
             if thumb.exists() or str(out).lower().endswith(".gif"):
                 continue   # GIF 不抽帧（面板直读首帧，预览播放动图）
             dur = self._probe_duration(out)
             candidates = [f"{dur / 2:.3f}"] if dur > 0 else ["1", "0.5", "0"]
             for ss in candidates:
+                if self._aborted:
+                    break
                 cmd = f'ffmpeg -y -ss {ss} -i "{out}" -frames:v 1 -vf "scale=640:-1" "{thumb}"'
-                subprocess.run(cmd, shell=True, capture_output=True)
+                p = self._spawn(cmd)
+                try:
+                    p.wait()
+                except Exception:
+                    pass
+                if self._aborted:
+                    break
                 if thumb.exists() and thumb.stat().st_size > 0:
                     break
         self.done.emit()
@@ -1337,20 +1374,51 @@ class _PreviewFrameExtractor(QThread):
         self.tid = tid
         self.out = out
         self.n = n
+        self._procs = []   # 运行中的 ffmpeg 子进程，供 kill() 终止以释放文件占用
+        self._aborted = False
+
+    def kill(self):
+        """终止抽帧：停止再派生新 ffmpeg，并杀掉已派生的子进程树（释放文件占用）。"""
+        import subprocess, platform
+        self._aborted = True
+        for p in self._procs:
+            try:
+                if p.poll() is None:
+                    if platform.system() == "Windows":
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                                       capture_output=True)
+                    else:
+                        p.kill()
+            except Exception:
+                pass
+        self._procs = []
+
+    def _spawn(self, cmd):
+        import subprocess, platform
+        kw = dict(shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if platform.system() == "Windows":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        p = subprocess.Popen(cmd, **kw)
+        self._procs.append(p)
+        return p
 
     def run(self):
-        import subprocess
         try:
             dur = ThumbExtractor._probe_duration(self.out)
             if dur > 0:
                 tmp_dir = app_data_dir() / "tmp" / "thumbs" / f"_sheet_{self.tid}"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 for i in range(self.n):
+                    if self._aborted:
+                        break
                     t = dur * (i + 0.5) / self.n
                     fp = tmp_dir / f"{i}.png"
-                    subprocess.run(
-                        f'ffmpeg -y -ss {t:.3f} -i "{self.out}" -frames:v 1 -vf "scale=320:-1" "{fp}"',
-                        shell=True, capture_output=True)
+                    p = self._spawn(
+                        f'ffmpeg -y -ss {t:.3f} -i "{self.out}" -frames:v 1 -vf "scale=320:-1" "{fp}"')
+                    try:
+                        p.wait()
+                    except Exception:
+                        pass
         except Exception:
             pass
         self.done.emit(self.tid)
@@ -1387,6 +1455,8 @@ class TaskListDialog(QDialog):
         self._thumb_busy = False
         self._thumb_worker = None
         self._sheet_workers = []   # 预览用 contact-sheet 后台抽取线程
+        self._preview_movie = None  # 预览中正在播放的 QMovie（GIF），删除任务前需停止以释放文件句柄
+        self._preview_view = None   # 预览中的 _ZoomImage，删除前需清空以释放 QMovie 引用
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
@@ -1550,6 +1620,44 @@ class TaskListDialog(QDialog):
         self._thumb_busy = False
         self.refresh()
 
+    def _stop_preview_movie(self):
+        """停止并释放预览中的 QMovie（GIF 动图），让其文件句柄立即关闭。"""
+        m = self._preview_movie
+        if m is not None:
+            try:
+                m.stop()
+            except Exception:
+                pass
+            self._preview_movie = None
+        v = self._preview_view
+        if v is not None:
+            try:
+                v.clearImage()
+            except Exception:
+                pass
+
+    def release_output(self, out):
+        """删除任务输出文件前，释放面板对它的一切占用：
+        停止预览 QMovie（GIF）、终止后台抽帧子进程（视频）、清除缩略图图标。
+        否则被占用的文件在 Windows 上无法移入回收站。"""
+        self._stop_preview_movie()
+        # 终止仍在读取输出文件的 ffmpeg 子进程（视频缩略图 / contact sheet）
+        for w in [self._thumb_worker, *self._sheet_workers]:
+            if w is None:
+                continue
+            try:
+                w.kill()
+            except Exception:
+                pass
+        # 清除缩略图图标，避免继续引用即将被删除的文件
+        try:
+            for row in range(self.table.rowCount()):
+                it = self.table.item(row, 0)
+                if it is not None:
+                    it.setIcon(QtGui.QIcon())
+        except Exception:
+            pass
+
     def _on_cell_double_click(self, row, col):
         if col != 0:
             return
@@ -1566,7 +1674,7 @@ class TaskListDialog(QDialog):
         h = QHBoxLayout(w)
         h.setContentsMargins(2, 2, 2, 2)
         h.setSpacing(4)
-        btn_r = QPushButton("恢复")
+        btn_r = QPushButton("导入")
         btn_r.clicked.connect(lambda *a, tid=tid: self.workbench._restore_task(tid))
         h.addWidget(btn_r)
         if status == "进行中":
@@ -1605,8 +1713,7 @@ class TaskListDialog(QDialog):
         # GIF 用 QMovie 动图；视频显示抽帧拼图（_ZoomImage 自适应窗口 + Ctrl+滚轮缩放）
         lbl_img = _ZoomImage()
         layout.addWidget(lbl_img, stretch=1)
-
-        movie = {"obj": None}
+        self._preview_view = lbl_img
 
         ctrl = QHBoxLayout()
         btn_open = QPushButton("播放")
@@ -1634,9 +1741,7 @@ class TaskListDialog(QDialog):
         state = {"pos": pos, "ids": ids, "out": "", "viewing": None, "outs": {}, "alive": True}
 
         def stop_current():
-            if movie["obj"]:
-                movie["obj"].stop()
-                movie["obj"] = None
+            self._stop_preview_movie()
 
         def open_player():
             out = state.get("out")
@@ -1664,12 +1769,26 @@ class TaskListDialog(QDialog):
             lbl_img.setMovie(None)
             lbl_img.clearImage()
             if is_gif:
-                m = QtGui.QMovie(out)
+                # 从内存加载 GIF，避免 QMovie 持有磁盘文件句柄
+                # （否则删除任务时输出文件被占用，尤其在打包 exe 下删不掉）。
+                m = QtGui.QMovie()
+                try:
+                    with open(out, "rb") as _f:
+                        _data = _f.read()
+                    _buf = QtCore.QBuffer()
+                    _buf.setData(_data)
+                    _buf.open(QtCore.QIODevice.ReadOnly)
+                    m = QtGui.QMovie(_buf, QtCore.QByteArray(b"gif"))
+                    _buf.setParent(m)   # buffer 随 QMovie 一起销毁
+                except Exception:
+                    m = QtGui.QMovie()
                 if m.isValid():
-                    native = QtGui.QPixmap(out).size() if out else None
+                    m.jumpToFrame(0)
+                    _ci = m.currentImage()
+                    native = _ci.size() if not _ci.isNull() else None
                     lbl_img.setMovie(m, native)
                     m.start()
-                    movie["obj"] = m
+                    self._preview_movie = m
                 else:
                     lbl_img.setMovie(None)
                     lbl_img.setText("(无法加载动图)")
@@ -1836,6 +1955,12 @@ class WorkbenchPage(QWidget):
         self.lbl_proj_source.setWordWrap(True)
         meta_bar.addWidget(self.lbl_proj_source, stretch=2)
 
+        self.btn_play_source = QPushButton("播放")
+        self.btn_play_source.setToolTip("用系统播放器播放项目的源视频")
+        self.btn_play_source.setEnabled(False)
+        self.btn_play_source.clicked.connect(self._play_source)
+        meta_bar.addWidget(self.btn_play_source)
+
         self.lbl_proj_target = QLabel("-")
         self.lbl_proj_target.setStyleSheet("color: #7f8c8d; font-size: 12px;")
         meta_bar.addWidget(self.lbl_proj_target, stretch=1)
@@ -1919,6 +2044,7 @@ class WorkbenchPage(QWidget):
         self.lbl_proj_title.setText(project.short_name)
         self.lbl_proj_source.setText(f"源: {project.source_file_path}")
         self.lbl_proj_target.setText(f"输出: {project.target_base_path}")
+        self._update_play_source_state()
 
         # 传递项目已绑定演员到各 Tab 的 ActorSelector
         for i in range(self.tabs.count()):
@@ -3641,13 +3767,31 @@ class WorkbenchPage(QWidget):
         if not t:
             return
         out = t.get("output_path") or ""
+        # 先释放应用对该输出文件的占用（预览 QMovie / 抽帧子进程 / 缩略图），
+        # 否则被占用的文件在 Windows 上无法移入回收站。
+        if self._task_dlg is not None:
+            self._task_dlg.release_output(out)
         if out and Path(out).exists():
-            result = QtCore.QFile.moveToTrash(str(out))
-            ok = result[0] if isinstance(result, tuple) else result
+            ok = self._move_to_trash(out)
             if not ok:
-                self.log(f"[任务] 输出文件删除失败：{Path(out).name}")
+                self.log(f"[任务] 输出文件删除失败（可能仍被占用）：{Path(out).name}")
         self.task_manager.delete(task_id)
         self._refresh_task_panel()
+
+    @staticmethod
+    def _move_to_trash(path, tries: int = 10, delay: float = 0.15):
+        """移至回收站；容忍 Windows 文件句柄释放的短暂延迟，重试若干次。"""
+        import time
+        p = Path(path)
+        for _ in range(tries):
+            if not p.exists():
+                return True
+            result = QtCore.QFile.moveToTrash(str(path))
+            ok = result[0] if isinstance(result, tuple) else result
+            if ok:
+                return True
+            time.sleep(delay)
+        return not p.exists()
 
     def _open_target_dir(self):
         import subprocess
@@ -3659,6 +3803,23 @@ class WorkbenchPage(QWidget):
                 subprocess.run(["explorer", str(path)])
             else:
                 subprocess.run(["xdg-open", str(path)])
+
+    def _update_play_source_state(self):
+        """播放源视频按钮：仅当项目已加载且源视频文件存在时可用。"""
+        ok = bool(self.project) and bool(self.project.source_file_path) \
+            and Path(self.project.source_file_path).exists()
+        self.btn_play_source.setEnabled(ok)
+
+    def _play_source(self):
+        """用系统默认播放器播放项目的源视频（规避 Qt DirectShow 解码缺失）。"""
+        if not self.project:
+            return
+        src = self.project.source_file_path or ""
+        if not src or not Path(src).exists():
+            self._update_play_source_state()
+            QMessageBox.warning(self, "无法播放", "源视频文件不存在，可能已被移动或删除。")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(src))
 
     def _on_archive(self):
         """打开归档整理对话框"""
